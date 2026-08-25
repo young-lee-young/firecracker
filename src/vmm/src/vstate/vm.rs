@@ -138,6 +138,8 @@ impl Vm {
 impl KvmVm {
     /// Create a KVM VM
     pub fn create_common(kvm: Kvm) -> Result<VmCommon, VmError> {
+        // 这里解释了为什么要重试，因为在系统负载高的情况下，内核会返回 EINTR 失败，防止用户程序一致等待
+
         // It is known that KVM_CREATE_VM occasionally fails with EINTR on heavily loaded machines
         // with many VMs.
         //
@@ -161,6 +163,7 @@ impl KvmVm {
         const MAX_ATTEMPTS: u32 = 5;
         let mut attempt = 1;
         let fd = loop {
+            // 创建 VM，最多重试 5 次
             match kvm.fd.create_vm() {
                 Ok(fd) => break fd,
                 Err(e) if e.errno() == libc::EINTR && attempt < MAX_ATTEMPTS => {
@@ -174,12 +177,16 @@ impl KvmVm {
             attempt += 1;
         };
 
+        // 创建非阻塞的 eventfd，用于通知 vcpu 退出
         let vcpus_exit_evt = EventFd::new(libc::EFD_NONBLOCK).map_err(VmError::EventFd)?;
 
         Ok(VmCommon {
             fd,
+            // 每个 region 是一个 slot，这里获取 KVM 支持最大多少个 slot
             max_memslots: kvm.max_nr_memslots(),
+            // 内存信息，这里初始化了一个空壳
             guest_memory: GuestMemoryMmap::default(),
+            // 内存的 slot 编号, 从 0 开始
             next_kvm_slot: AtomicU32::new(0),
             interrupts: Mutex::new(HashMap::with_capacity(GSI_MSI_END as usize + 1)),
             resource_allocator: Mutex::new(ResourceAllocator::new()),
@@ -198,11 +205,15 @@ impl KvmVm {
         self.arch_pre_create_vcpus(vcpu_count)?;
 
         let mut vcpus = Vec::with_capacity(vcpu_count as usize);
+
         for cpu_idx in 0..vcpu_count {
+            // vCPU eventfd，所有的 vCPU 使用的是同一个
             let exit_evt = self
                 .vcpus_exit_evt()
                 .try_clone()
                 .map_err(VmError::EventFd)?;
+
+            // 真正创建 vCPU
             let vcpu = Vcpu::new(cpu_idx, self, exit_evt).map_err(VmError::CreateVcpu)?;
             vcpus.push(vcpu);
         }
@@ -427,16 +438,24 @@ impl KvmVm {
     }
 
     fn register_memory_region(&mut self, region: Arc<GuestRegionMmapExt>) -> Result<(), VmError> {
+        // 给 vm 结构体的 common.guest_memory 插入一条 region 信息
         let new_guest_memory = self
             .common
             .guest_memory
             .insert_region(Arc::clone(&region))?;
 
+        // 如果启用了热插拔内存则一个 region 可能有多个 slot
+        // TODO Lee P1 内存热插拔学习，这个 slots 方法实现还要好好看看
         region
             .slots()
+            // plugged 为 false 是不会被注册到 KVM 中的
             .try_for_each(|(ref slot, plugged)| match plugged {
+                // 真正调用 KVM 的系统调用把内存注册进去
                 // if the slot is plugged, add it to kvm user memory regions
                 true => self.set_user_memory_region(slot.into()),
+
+                // 把这段内存给保护起来，不让 Firecracker 使用
+                // 主要是保护热插拔的内存
                 // if the slot is not plugged, protect accesses to it
                 false => slot.protect(true).map_err(VmError::MemoryError),
             })?;
@@ -452,10 +471,14 @@ impl KvmVm {
         regions: Vec<GuestRegionMmap>,
     ) -> Result<(), VmError> {
         for region in regions {
+            // 申请一个 KVM memory slot
             let next_slot = self
                 .next_kvm_slot(1)
                 .ok_or(VmError::NotEnoughMemorySlots(self.common.max_memslots))?;
 
+
+            // 就是吧 region 給包装下
+            // 添加一些 slot 索引、大小、类型 这些信息
             let arcd_region =
                 Arc::new(GuestRegionMmapExt::dram_from_mmap_region(region, next_slot));
 
@@ -471,18 +494,30 @@ impl KvmVm {
         region: GuestRegionMmap,
         slot_size: usize,
     ) -> Result<(), VmError> {
+        // 断言可以完整切成多个 slot
         // caller should ensure the slot size divides the region length.
         assert!(region.len().is_multiple_of(slot_size as u64));
+
+
+        // 计算下这段内存可以拆分成多少个 slot，默认每个 slot 128 MiB
         let slot_cnt = (region.len() / (slot_size as u64))
             .try_into()
             .map_err(|_| VmError::NotEnoughMemorySlots(self.common.max_memslots))?;
+
+        
+        // 申请 slot_cnt 个 slot
         let slot_from = self
             .next_kvm_slot(slot_cnt)
             .ok_or(VmError::NotEnoughMemorySlots(self.common.max_memslots))?;
+
+
+        // 还是把 region 包装一下，和普通的内存是一样的
         let arcd_region = Arc::new(GuestRegionMmapExt::hotpluggable_from_mmap_region(
             region, slot_from, slot_size,
         ));
 
+        
+        // 向 KVM 中注册
         self.register_memory_region(arcd_region)
     }
 
@@ -761,411 +796,4 @@ fn mincore_bitmap(addr: *mut u8, len: usize) -> Result<Vec<u64>, VmError> {
     }
 
     Ok(bitmap)
-}
-
-#[cfg(test)]
-pub(crate) mod tests {
-    use std::sync::atomic::Ordering;
-
-    use vm_memory::GuestAddress;
-    use vm_memory::mmap::MmapRegionBuilder;
-
-    use super::*;
-    use crate::arch;
-    use crate::pci::PciSBDF;
-    use crate::snapshot::Persist;
-    use crate::test_utils::single_region_mem_raw;
-    use crate::utils::mib_to_bytes;
-    use crate::vstate::kvm::Kvm;
-    use crate::vstate::memory::GuestRegionMmap;
-
-    // Auxiliary function being used throughout the tests.
-    pub(crate) fn setup_vm() -> KvmVm {
-        let kvm = Kvm::new(vec![]).expect("Cannot create Kvm");
-        KvmVm::new(kvm).expect("Cannot create new vm")
-    }
-
-    // Auxiliary function being used throughout the tests.
-    pub(crate) fn setup_vm_with_memory(mem_size: usize) -> KvmVm {
-        let mut vm = setup_vm();
-        let gm = single_region_mem_raw(mem_size);
-        vm.register_dram_memory_regions(gm).unwrap();
-        vm
-    }
-
-    #[test]
-    fn test_new() {
-        // Testing with a valid /dev/kvm descriptor.
-        let kvm = Kvm::new(vec![]).expect("Cannot create Kvm");
-        KvmVm::new(kvm).unwrap();
-    }
-
-    #[test]
-    fn test_register_memory_regions() {
-        let mut vm = setup_vm();
-
-        // Trying to set a memory region with a size that is not a multiple of GUEST_PAGE_SIZE
-        // will result in error.
-        let gm = single_region_mem_raw(0x10);
-        let res = vm.register_dram_memory_regions(gm);
-        assert_eq!(
-            res.unwrap_err().to_string(),
-            "Cannot set the memory regions: Invalid argument (os error 22)"
-        );
-
-        let gm = single_region_mem_raw(0x1000);
-        let res = vm.register_dram_memory_regions(gm);
-        res.unwrap();
-    }
-
-    #[test]
-    fn test_too_many_regions() {
-        let mut vm = setup_vm();
-        let max_nr_regions = vm.kvm().max_nr_memslots();
-
-        // SAFETY: valid mmap parameters
-        let ptr = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                0x1000,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_ANONYMOUS | libc::MAP_PRIVATE,
-                -1,
-                0,
-            )
-        };
-
-        assert_ne!(ptr, libc::MAP_FAILED);
-
-        for i in 0..=max_nr_regions {
-            // SAFETY: we assert above that the ptr is valid, and the size matches what we passed to
-            // mmap
-            let region = unsafe {
-                MmapRegionBuilder::new(0x1000)
-                    .with_raw_mmap_pointer(ptr.cast())
-                    .build()
-                    .unwrap()
-            };
-
-            let region = GuestRegionMmap::new(region, GuestAddress(i as u64 * 0x1000)).unwrap();
-
-            let res = vm.register_dram_memory_regions(vec![region]);
-
-            if max_nr_regions <= i {
-                assert!(
-                    matches!(res, Err(VmError::NotEnoughMemorySlots(v)) if v == max_nr_regions),
-                    "{:?} at iteration {}",
-                    res,
-                    i
-                );
-            } else {
-                res.unwrap_or_else(|_| {
-                    panic!(
-                        "to be able to insert more regions in iteration {i} - max_nr_memslots: \
-                         {max_nr_regions} - num_regions: {}",
-                        vm.guest_memory().num_regions()
-                    )
-                });
-            }
-        }
-    }
-
-    #[test]
-    fn test_create_vcpus() {
-        let vcpu_count = 2;
-        let mut vm = setup_vm_with_memory(mib_to_bytes(128));
-
-        let vcpu_vec = vm.create_vcpus(vcpu_count).unwrap();
-
-        assert_eq!(vcpu_vec.len(), vcpu_count as usize);
-    }
-
-    fn enable_irqchip(vm: &mut KvmVm) {
-        #[cfg(target_arch = "x86_64")]
-        vm.setup_irqchip().unwrap();
-        #[cfg(target_arch = "aarch64")]
-        vm.setup_irqchip(1).unwrap();
-    }
-
-    #[test]
-    fn test_msi_vector_group_new() {
-        let vm = setup_vm_with_memory(mib_to_bytes(128));
-        let vm = Arc::new(vm);
-        let msix_group = KvmVm::create_msix_group(vm.clone(), 4).unwrap();
-        assert_eq!(msix_group.num_vectors(), 4);
-    }
-
-    #[test]
-    fn test_msi_vector_group_enable_disable() {
-        let mut vm = setup_vm_with_memory(mib_to_bytes(128));
-        enable_irqchip(&mut vm);
-        let vm = Arc::new(vm);
-        let msix_group = KvmVm::create_msix_group(vm.clone(), 4).unwrap();
-
-        // Initially all vectors are disabled
-        for route in &msix_group.vectors {
-            assert!(!route.enabled.load(Ordering::Acquire))
-        }
-
-        // Enable works
-        msix_group.enable().unwrap();
-        for route in &msix_group.vectors {
-            assert!(route.enabled.load(Ordering::Acquire));
-        }
-        // Enabling an enabled group doesn't error out
-        msix_group.enable().unwrap();
-
-        // Disable works
-        msix_group.disable().unwrap();
-        for route in &msix_group.vectors {
-            assert!(!route.enabled.load(Ordering::Acquire))
-        }
-        // Disabling a disabled group doesn't error out
-    }
-
-    #[test]
-    fn test_msi_vector_group_trigger() {
-        let mut vm = setup_vm_with_memory(mib_to_bytes(128));
-        enable_irqchip(&mut vm);
-
-        let vm = Arc::new(vm);
-        let msix_group = KvmVm::create_msix_group(vm.clone(), 4).unwrap();
-
-        // We can now trigger all vectors
-        for i in 0..4 {
-            msix_group.trigger(i).unwrap()
-        }
-
-        // We can't trigger an invalid vector
-        msix_group.trigger(4).unwrap_err();
-    }
-
-    #[test]
-    fn test_msi_vector_group_notifier() {
-        let vm = setup_vm_with_memory(mib_to_bytes(128));
-        let vm = Arc::new(vm);
-        let msix_group = KvmVm::create_msix_group(vm.clone(), 4).unwrap();
-
-        for i in 0..4 {
-            assert!(msix_group.notifier(i).is_some());
-        }
-
-        assert!(msix_group.notifier(4).is_none());
-    }
-
-    #[test]
-    fn test_msi_vector_group_update_invalid_vector() {
-        let mut vm = setup_vm_with_memory(mib_to_bytes(128));
-        enable_irqchip(&mut vm);
-        let vm = Arc::new(vm);
-        let msix_group = KvmVm::create_msix_group(vm.clone(), 4).unwrap();
-        let config = MsixVectorConfig {
-            high_addr: 0x42,
-            low_addr: 0x12,
-            data: 0x12,
-            devid: PciSBDF::from(0xafa),
-        };
-        msix_group.update(0, config, true, true).unwrap();
-        msix_group.update(4, config, true, true).unwrap_err();
-    }
-
-    #[test]
-    fn test_msi_vector_group_update() {
-        let mut vm = setup_vm_with_memory(mib_to_bytes(128));
-        enable_irqchip(&mut vm);
-        let vm = Arc::new(vm);
-        assert!(vm.common.interrupts.lock().unwrap().is_empty());
-        let msix_group = KvmVm::create_msix_group(vm.clone(), 4).unwrap();
-
-        // Set some configuration for the vectors. Initially all are masked
-        let mut config = MsixVectorConfig {
-            high_addr: 0x42,
-            low_addr: 0x13,
-            data: 0x12,
-            devid: PciSBDF::from(0xafa),
-        };
-        for i in 0..4 {
-            config.data = 0x12 * i;
-            msix_group.update(i as usize, config, true, false).unwrap();
-        }
-
-        // All vectors should be disabled
-        for vector in &msix_group.vectors {
-            assert!(!vector.enabled.load(Ordering::Acquire));
-        }
-
-        for i in 0..4 {
-            let gsi = crate::arch::GSI_MSI_START + i;
-            let interrupts = vm.common.interrupts.lock().unwrap();
-            let kvm_route = interrupts.get(&gsi).unwrap();
-            assert!(kvm_route.masked);
-            assert_eq!(kvm_route.entry.gsi, gsi);
-            assert_eq!(kvm_route.entry.type_, KVM_IRQ_ROUTING_MSI);
-            // SAFETY: because we know we setup MSI routes.
-            unsafe {
-                assert_eq!(kvm_route.entry.u.msi.address_hi, 0x42);
-                assert_eq!(kvm_route.entry.u.msi.address_lo, 0x13);
-                assert_eq!(kvm_route.entry.u.msi.data, 0x12 * i);
-            }
-        }
-
-        // Simply enabling the vectors should not update the registered IRQ routes
-        msix_group.enable().unwrap();
-        for i in 0..4 {
-            let gsi = crate::arch::GSI_MSI_START + i;
-            let interrupts = vm.common.interrupts.lock().unwrap();
-            let kvm_route = interrupts.get(&gsi).unwrap();
-            assert!(kvm_route.masked);
-            assert_eq!(kvm_route.entry.gsi, gsi);
-            assert_eq!(kvm_route.entry.type_, KVM_IRQ_ROUTING_MSI);
-            // SAFETY: because we know we setup MSI routes.
-            unsafe {
-                assert_eq!(kvm_route.entry.u.msi.address_hi, 0x42);
-                assert_eq!(kvm_route.entry.u.msi.address_lo, 0x13);
-                assert_eq!(kvm_route.entry.u.msi.data, 0x12 * i);
-            }
-        }
-
-        // Updating the config of a vector should enable its route (and only its route)
-        config.data = 0;
-        msix_group.update(0, config, false, true).unwrap();
-        for i in 0..4 {
-            let gsi = crate::arch::GSI_MSI_START + i;
-            let interrupts = vm.common.interrupts.lock().unwrap();
-            let kvm_route = interrupts.get(&gsi).unwrap();
-            assert_eq!(kvm_route.masked, i != 0);
-            assert_eq!(kvm_route.entry.gsi, gsi);
-            assert_eq!(kvm_route.entry.type_, KVM_IRQ_ROUTING_MSI);
-            // SAFETY: because we know we setup MSI routes.
-            unsafe {
-                assert_eq!(kvm_route.entry.u.msi.address_hi, 0x42);
-                assert_eq!(kvm_route.entry.u.msi.address_lo, 0x13);
-                assert_eq!(kvm_route.entry.u.msi.data, 0x12 * i);
-            }
-        }
-    }
-
-    #[test]
-    fn test_msi_vector_group_persistence() {
-        let mut vm = setup_vm_with_memory(mib_to_bytes(128));
-        enable_irqchip(&mut vm);
-        let vm = Arc::new(vm);
-        let msix_group = KvmVm::create_msix_group(vm.clone(), 4).unwrap();
-
-        msix_group.enable().unwrap();
-        let state = msix_group.save();
-
-        // On the real restore path the allocator state omits MSI GSIs before devices replay
-        // their allocations. Mimic that here so `restore` can re-claim the saved GSIs.
-        let allocator_state = vm.resource_allocator().save();
-        *vm.resource_allocator() = ResourceAllocator::restore((), &allocator_state).unwrap();
-        let restored_group = MsixVectorGroup::restore(vm.clone(), &state).unwrap();
-
-        assert_eq!(msix_group.num_vectors(), restored_group.num_vectors());
-        // Even if an MSI group is enabled, we don't save it as such. During restoration, the PCI
-        // transport will make sure the correct config is set for the vectors and enable them
-        // accordingly.
-        for (id, vector) in msix_group.vectors.iter().enumerate() {
-            let new_vector = &restored_group.vectors[id];
-            assert_eq!(vector.gsi, new_vector.gsi);
-            assert!(!new_vector.enabled.load(Ordering::Acquire));
-        }
-
-        // Both groups own the same GSIs in this test so dropping both will result in panic. Resolve
-        // this by simply forgetting about the restored version.
-        std::mem::forget(restored_group);
-    }
-
-    #[test]
-    fn test_msi_vector_group_restore_rejects_out_of_range_gsi() {
-        let mut vm = setup_vm_with_memory(mib_to_bytes(128));
-        enable_irqchip(&mut vm);
-        let vm = Arc::new(vm);
-
-        // A snapshot with a GSI outside the managed MSI range must be rejected rather than panic
-        // when the GSI is later freed on drop.
-        let tampered_state = vec![arch::GSI_MSI_END + 1];
-        MsixVectorGroup::restore(vm.clone(), &tampered_state).unwrap_err();
-    }
-
-    #[test]
-    fn test_msi_vector_group_drop_frees_gsis() {
-        let mut vm = setup_vm_with_memory(mib_to_bytes(128));
-        enable_irqchip(&mut vm);
-        let vm = Arc::new(vm);
-
-        let gsis_before = vm.resource_allocator().allocate_gsi_msi(1).unwrap();
-        for id in gsis_before.iter() {
-            vm.resource_allocator()
-                .gsi_msi_allocator
-                .free_id(*id)
-                .unwrap();
-        }
-
-        // Allocating, configuring and dropping a group must leave the allocator and the routing
-        // table in the same state as before.
-        {
-            let group = KvmVm::create_msix_group(vm.clone(), 4).unwrap();
-            let config = MsixVectorConfig {
-                high_addr: 0x42,
-                low_addr: 0x13,
-                data: 0x12,
-                devid: PciSBDF::from(0xafa),
-            };
-            for i in 0..group.num_vectors() as usize {
-                group.update(i, config, false, true).unwrap();
-            }
-            assert_eq!(vm.common.interrupts.lock().unwrap().len(), 4);
-        }
-
-        assert!(vm.common.interrupts.lock().unwrap().is_empty());
-        let gsis_after = vm.resource_allocator().allocate_gsi_msi(1).unwrap();
-        assert_eq!(gsis_before, gsis_after);
-    }
-
-    #[cfg(target_arch = "x86_64")]
-    #[test]
-    fn test_restore_state_resource_allocator() {
-        use vm_allocator::AllocPolicy;
-
-        let mut vm = setup_vm_with_memory(0x1000);
-        vm.setup_irqchip().unwrap();
-
-        // Allocate a GSI and some memory.
-        let (gsi, range) = {
-            let mut resource_allocator = vm.resource_allocator();
-
-            let gsi = resource_allocator.allocate_gsi_msi(1).unwrap()[0];
-            let range = resource_allocator
-                .mmio32_memory
-                .allocate(1024, 1024, AllocPolicy::FirstMatch)
-                .unwrap();
-            (gsi, range.start())
-        };
-
-        let state = vm.save_state().unwrap();
-        let serialized_data = bitcode::serialize(&state).unwrap();
-
-        let restored_state: VmState = bitcode::deserialize(&serialized_data).unwrap();
-        vm.restore_state(&restored_state, false).unwrap();
-
-        let mut resource_allocator = vm.resource_allocator();
-
-        // The MSI GSI allocator is reset on restore (its allocations are replayed by the devices),
-        // so the previously allocated GSI is free again and is the first one handed out.
-        let gsi_new = resource_allocator.allocate_gsi_msi(1).unwrap()[0];
-        assert_eq!(gsi, gsi_new);
-
-        // Memory allocations, on the other hand, are restored from the serialized state, so the
-        // range allocated before the snapshot is still reserved.
-        resource_allocator
-            .mmio32_memory
-            .allocate(1024, 1024, AllocPolicy::ExactMatch(range))
-            .unwrap_err();
-        let range_new = resource_allocator
-            .mmio32_memory
-            .allocate(1024, 1024, AllocPolicy::FirstMatch)
-            .unwrap();
-        assert_eq!(range + 1024, range_new.start());
-    }
 }

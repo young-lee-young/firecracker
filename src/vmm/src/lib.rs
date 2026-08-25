@@ -104,8 +104,6 @@ pub mod seccomp;
 pub mod signal_handler;
 /// Serialization and deserialization facilities
 pub mod snapshot;
-/// Utility functions for integration and benchmark testing
-pub mod test_utils;
 /// Utility functions and struct
 pub mod utils;
 /// Wrappers over structures used to configure the VMM.

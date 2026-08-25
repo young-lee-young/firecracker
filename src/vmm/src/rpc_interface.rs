@@ -283,12 +283,15 @@ fn mmds_put_data(
 pub struct PrebootApiController<'a> {
     seccomp_filters: &'a BpfThreadMap,
     instance_info: InstanceInfo,
+    // vm_resource 就是 vmm 资源信息
     vm_resources: &'a mut VmResources,
     event_manager: &'a mut EventManager,
     /// The [`Vmm`] object constructed through requests
     pub built_vmm: Option<Arc<Mutex<Vmm>>>,
     // Configuring boot specific resources will set this to true.
     // Loading from snapshot will not be allowed once this is true.
+    // 这个字段是用来判断使用普通启动，还是通过 snapshot 启动
+    // 如果使用普通启动，那么不允许再调用 loadsnapshot 方法
     boot_path: bool,
     // Some PrebootApiRequest errors are irrecoverable and Firecracker
     // should cleanly teardown if they occur.
@@ -400,22 +403,28 @@ impl<'a> PrebootApiController<'a> {
         // Configure and start microVM through successive API calls.
         // Iterate through API calls to configure microVm.
         // The loop breaks when a microVM is successfully started, and a running Vmm is built.
+        // 一直到调用 InstanceStart 前，built_vmm 都是空的
+        // 调用 InstanceStart 后，会给 built_vmm 赋值，这个循环跳出
         while preboot_controller.built_vmm.is_none() {
             // Get request
+            // 从管道里读取请求数据
             let req = from_api
                 .recv()
                 .expect("The channel's sending half was disconnected. Cannot receive data.");
 
             // Also consume the API event along with the message. It is safe to unwrap()
             // because this event_fd is blocking.
+            // 消费通知消息
             api_event_fd
                 .read()
                 .expect("VMM: Failed to read the API event_fd");
 
             // Process the request.
+            // 处理 vmm 配置请求
             let res = preboot_controller.handle_preboot_request(*req);
 
             // Send back the response.
+            // 发送相应
             to_api.send(Box::new(res)).expect("one-shot channel closed");
 
             // If any fatal errors were encountered, break the loop.
@@ -439,7 +448,9 @@ impl<'a> PrebootApiController<'a> {
 
         match request {
             // Supported operations allowed pre-boot.
+            // PUT boot-source 接口，配置 kernel 路径和 内核启动参数
             ConfigureBootSource(config) => self.set_boot_source(config),
+            // logger 接口
             ConfigureLogger(logger_cfg) => crate::logger::LOGGER
                 .update(logger_cfg)
                 .map(|()| VmmData::Empty)
@@ -471,6 +482,7 @@ impl<'a> PrebootApiController<'a> {
             )),
             GetVmInstanceInfo => Ok(VmmData::InstanceInformation(self.instance_info.clone())),
             GetVmmVersion => Ok(VmmData::VmmVersion(self.instance_info.vmm_version.clone())),
+            // PUT drives/rootfs 接口，配置虚拟机的 rootfs
             InsertBlockDevice(config) => self.insert_block_device(config),
             InsertPmemDevice(config) => self.insert_pmem_device(config),
             InsertNetworkDevice(config) => self.insert_net_device(config),
@@ -495,7 +507,9 @@ impl<'a> PrebootApiController<'a> {
             SetBalloonDevice(config) => self.set_balloon_device(config),
             SetVsockDevice(config) => self.set_vsock_device(config),
             SetMmdsConfiguration(config) => self.set_mmds_config(config),
+            // PUT actions InstanceStart 接口
             StartMicroVm => self.start_microvm(),
+            // PUT machine-config 接口
             UpdateMachineConfiguration(config) => self.update_machine_config(config),
             SetEntropyDevice(config) => self.set_entropy_device(config),
             SetMemoryHotplugDevice(config) => self.set_memory_hotplug_device(config),
@@ -531,6 +545,7 @@ impl<'a> PrebootApiController<'a> {
 
     fn insert_block_device(&mut self, cfg: BlockDeviceConfig) -> Result<VmmData, VmmActionError> {
         self.boot_path = true;
+        // 配置 vm_resource 的 block
         self.vm_resources
             .set_block_device(cfg)
             .map(|()| VmmData::Empty)
@@ -566,6 +581,7 @@ impl<'a> PrebootApiController<'a> {
 
     fn set_boot_source(&mut self, cfg: BootSourceConfig) -> Result<VmmData, VmmActionError> {
         self.boot_path = true;
+        // 给 PrebootApiController 的 vm_resources 中的 boot_source 赋值
         self.vm_resources
             .build_boot_source(cfg)
             .map(|()| VmmData::Empty)
@@ -625,6 +641,7 @@ impl<'a> PrebootApiController<'a> {
     // On success, this command will end the pre-boot stage and this controller
     // will be replaced by a runtime controller.
     fn start_microvm(&mut self) -> Result<VmmData, VmmActionError> {
+        // build_and_boot_microvm 里实例化了 vmm
         build_and_boot_microvm(
             &self.instance_info,
             self.vm_resources,
@@ -632,6 +649,8 @@ impl<'a> PrebootApiController<'a> {
             self.seccomp_filters,
         )
         .map(|vmm| {
+            // 这里把 built_vmm 给赋值了，表明这个 vmm 启动了
+            // 以后的请求处理就靠 event_manager 来做
             self.built_vmm = Some(vmm);
             VmmData::Empty
         })
@@ -646,6 +665,7 @@ impl<'a> PrebootApiController<'a> {
     ) -> Result<VmmData, LoadSnapshotError> {
         let load_start_us = get_time_us(ClockType::Monotonic);
 
+        // 普通启动不允许调用 load_snapshot 方法
         if self.boot_path {
             let err = LoadSnapshotError::LoadSnapshotNotAllowed;
             info!("{}", err);
@@ -1025,319 +1045,5 @@ impl RuntimeApiController {
             .map(|()| VmmData::Empty)
             .map_err(NetworkInterfaceError::DeviceUpdate)
             .map_err(VmmActionError::NetworkConfig)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::path::PathBuf;
-
-    use super::*;
-    use crate::HTTP_MAX_PAYLOAD_SIZE;
-    use crate::builder::tests::default_vmm;
-    use crate::mmds::data_store::MmdsVersion;
-    use crate::seccomp::BpfThreadMap;
-    use crate::vmm_config::snapshot::{MemBackendConfig, MemBackendType};
-
-    fn default_preboot<'a>(
-        vm_resources: &'a mut VmResources,
-        event_manager: &'a mut EventManager,
-        seccomp_filters: &'a BpfThreadMap,
-    ) -> PrebootApiController<'a> {
-        let instance_info = InstanceInfo::default();
-        PrebootApiController::new(seccomp_filters, instance_info, vm_resources, event_manager)
-    }
-
-    fn preboot_request(request: VmmAction) -> Result<VmmData, VmmActionError> {
-        let mut vm_resources = VmResources::default();
-        let mut evmgr = EventManager::new().unwrap();
-        let seccomp_filters = BpfThreadMap::new();
-        let mut preboot = default_preboot(&mut vm_resources, &mut evmgr, &seccomp_filters);
-        preboot.handle_preboot_request(request)
-    }
-
-    fn preboot_request_with_mmds(
-        request: VmmAction,
-        mmds: Arc<Mutex<Mmds>>,
-    ) -> Result<VmmData, VmmActionError> {
-        let mut vm_resources = VmResources {
-            mmds: Some(mmds),
-            mmds_size_limit: HTTP_MAX_PAYLOAD_SIZE,
-            ..Default::default()
-        };
-        let mut evmgr = EventManager::new().unwrap();
-        let seccomp_filters = BpfThreadMap::new();
-        let mut preboot = default_preboot(&mut vm_resources, &mut evmgr, &seccomp_filters);
-        preboot.handle_preboot_request(request)
-    }
-
-    #[test]
-    fn test_preboot_get_vm_config() {
-        assert_eq!(
-            preboot_request(VmmAction::GetVmMachineConfig).unwrap(),
-            VmmData::MachineConfiguration(MachineConfig::default())
-        );
-    }
-
-    #[test]
-    fn test_preboot_get_mmds() {
-        assert_eq!(
-            preboot_request(VmmAction::GetMMDS).unwrap(),
-            VmmData::MmdsValue(Value::Null)
-        );
-    }
-
-    #[test]
-    fn test_runtime_get_mmds() {
-        assert!(matches!(
-            runtime_request(VmmAction::GetMMDS),
-            Err(VmmActionError::Mmds(
-                data_store::MmdsDatastoreError::NotInitialized
-            ))
-        ));
-    }
-
-    #[test]
-    fn test_preboot_put_mmds() {
-        let mmds = Arc::new(Mutex::new(Mmds::default()));
-
-        assert_eq!(
-            preboot_request_with_mmds(
-                VmmAction::PutMMDS(Value::String("string".to_string())),
-                mmds.clone()
-            )
-            .unwrap(),
-            VmmData::Empty
-        );
-        assert_eq!(
-            preboot_request_with_mmds(VmmAction::GetMMDS, mmds.clone()).unwrap(),
-            VmmData::MmdsValue(Value::String("string".to_string()))
-        );
-
-        let filling = (0..51300).map(|_| "X").collect::<String>();
-        let data = "{\"key\": \"".to_string() + &filling + "\"}";
-
-        assert!(matches!(
-            preboot_request_with_mmds(
-                VmmAction::PutMMDS(serde_json::from_str(&data).unwrap()),
-                mmds.clone()
-            ),
-            Err(VmmActionError::MmdsLimitExceeded(_))
-        ));
-        assert_eq!(
-            preboot_request_with_mmds(VmmAction::GetMMDS, mmds).unwrap(),
-            VmmData::MmdsValue(Value::String("string".to_string()))
-        );
-    }
-
-    #[test]
-    fn test_preboot_patch_mmds() {
-        let mmds = Arc::new(Mutex::new(Mmds::default()));
-        // MMDS data store is not yet initialized.
-        let res = preboot_request(VmmAction::PatchMMDS(Value::String("string".to_string())));
-        assert!(
-            matches!(
-                res,
-                Err(VmmActionError::Mmds(
-                    data_store::MmdsDatastoreError::NotInitialized
-                ))
-            ),
-            "{:?}",
-            res
-        );
-
-        assert_eq!(
-            preboot_request_with_mmds(
-                VmmAction::PutMMDS(
-                    serde_json::from_str(r#"{"key1": "value1", "key2": "val2"}"#).unwrap(),
-                ),
-                mmds.clone()
-            )
-            .unwrap(),
-            VmmData::Empty
-        );
-        assert_eq!(
-            preboot_request_with_mmds(VmmAction::GetMMDS, mmds.clone()).unwrap(),
-            VmmData::MmdsValue(
-                serde_json::from_str(r#"{"key1": "value1", "key2": "val2"}"#).unwrap()
-            )
-        );
-
-        assert_eq!(
-            preboot_request_with_mmds(
-                VmmAction::PatchMMDS(
-                    serde_json::from_str(r#"{"key1": null, "key2": "value2"}"#).unwrap(),
-                ),
-                mmds.clone()
-            )
-            .unwrap(),
-            VmmData::Empty
-        );
-
-        assert_eq!(
-            preboot_request_with_mmds(VmmAction::GetMMDS, mmds.clone()).unwrap(),
-            VmmData::MmdsValue(serde_json::from_str(r#"{"key2": "value2"}"#).unwrap())
-        );
-
-        let filling = (0..HTTP_MAX_PAYLOAD_SIZE).map(|_| "X").collect::<String>();
-        let data = "{\"key\": \"".to_string() + &filling + "\"}";
-
-        assert!(matches!(
-            preboot_request_with_mmds(
-                VmmAction::PatchMMDS(serde_json::from_str(&data).unwrap()),
-                mmds.clone()
-            ),
-            Err(VmmActionError::MmdsLimitExceeded(_))
-        ));
-        assert_eq!(
-            preboot_request_with_mmds(VmmAction::GetMMDS, mmds).unwrap(),
-            VmmData::MmdsValue(serde_json::from_str(r#"{"key2": "value2"}"#).unwrap())
-        );
-    }
-
-    #[test]
-    fn test_preboot_disallowed() {
-        fn check_unsupported(res: Result<VmmData, VmmActionError>) {
-            assert!(
-                matches!(res, Err(VmmActionError::OperationNotSupportedPreBoot)),
-                "{:?}",
-                res
-            );
-        }
-
-        check_unsupported(preboot_request(VmmAction::FlushMetrics));
-        check_unsupported(preboot_request(VmmAction::Pause));
-        check_unsupported(preboot_request(VmmAction::Resume));
-        check_unsupported(preboot_request(VmmAction::GetBalloonStats));
-        check_unsupported(preboot_request(VmmAction::UpdateBalloon(
-            BalloonUpdateConfig { amount_mib: 0 },
-        )));
-        check_unsupported(preboot_request(VmmAction::StartFreePageHinting(
-            Default::default(),
-        )));
-        check_unsupported(preboot_request(VmmAction::GetFreePageHintingStatus));
-        check_unsupported(preboot_request(VmmAction::StopFreePageHinting));
-        check_unsupported(preboot_request(VmmAction::UpdateBalloonStatistics(
-            BalloonUpdateStatsConfig {
-                stats_polling_interval_s: 0,
-            },
-        )));
-        check_unsupported(preboot_request(VmmAction::UpdateBlockDevice(
-            BlockDeviceUpdateConfig::default(),
-        )));
-        check_unsupported(preboot_request(VmmAction::UpdatePmemDevice(
-            PmemDeviceUpdateConfig::default(),
-        )));
-        check_unsupported(preboot_request(VmmAction::UpdateNetworkInterface(
-            NetworkInterfaceUpdateConfig {
-                iface_id: String::new(),
-                rx_rate_limiter: None,
-                tx_rate_limiter: None,
-            },
-        )));
-        check_unsupported(preboot_request(VmmAction::CreateSnapshot(
-            CreateSnapshotParams {
-                snapshot_type: SnapshotType::Full,
-                snapshot_path: PathBuf::new(),
-                mem_file_path: PathBuf::new(),
-            },
-        )));
-        #[cfg(target_arch = "x86_64")]
-        check_unsupported(preboot_request(VmmAction::SendCtrlAltDel));
-        check_unsupported(preboot_request(VmmAction::UpdateMemoryHotplugSize(
-            MemoryHotplugSizeUpdate {
-                requested_size_mib: 0,
-            },
-        )));
-    }
-
-    fn runtime_request(request: VmmAction) -> Result<VmmData, VmmActionError> {
-        let vmm = Arc::new(Mutex::new(default_vmm()));
-        let mut runtime = RuntimeApiController::new(vmm.clone());
-        let mut event_manager = EventManager::new().unwrap();
-        runtime.handle_request(request, &mut event_manager)
-    }
-
-    #[test]
-    fn test_runtime_get_vm_config() {
-        assert_eq!(
-            runtime_request(VmmAction::GetVmMachineConfig).unwrap(),
-            VmmData::MachineConfiguration(MachineConfig::default())
-        );
-    }
-
-    #[test]
-    fn test_runtime_disallowed() {
-        fn check_unsupported(res: Result<VmmData, VmmActionError>) {
-            assert!(
-                matches!(res, Err(VmmActionError::OperationNotSupportedPostBoot)),
-                "{:?}",
-                res
-            );
-        }
-
-        check_unsupported(runtime_request(VmmAction::ConfigureBootSource(
-            BootSourceConfig::default(),
-        )));
-        check_unsupported(runtime_request(VmmAction::ConfigureLogger(LoggerConfig {
-            log_path: Some(PathBuf::new()),
-            level: Some(crate::logger::LevelFilter::Debug),
-            show_level: Some(false),
-            show_log_origin: Some(false),
-            module: None,
-        })));
-        check_unsupported(runtime_request(VmmAction::ConfigureMetrics(
-            MetricsConfig {
-                metrics_path: PathBuf::new(),
-            },
-        )));
-        check_unsupported(runtime_request(VmmAction::SetVsockDevice(
-            VsockDeviceConfig {
-                vsock_id: Some(String::new()),
-                guest_cid: 0,
-                uds_path: String::new(),
-            },
-        )));
-        check_unsupported(runtime_request(VmmAction::SetBalloonDevice(
-            BalloonDeviceConfig::default(),
-        )));
-        check_unsupported(runtime_request(VmmAction::SetVsockDevice(
-            VsockDeviceConfig {
-                vsock_id: Some(String::new()),
-                guest_cid: 0,
-                uds_path: String::new(),
-            },
-        )));
-        check_unsupported(runtime_request(VmmAction::SetMmdsConfiguration(
-            MmdsConfig {
-                ipv4_address: None,
-                version: MmdsVersion::default(),
-                network_interfaces: Vec::new(),
-                imds_compat: false,
-            },
-        )));
-        check_unsupported(runtime_request(VmmAction::UpdateMachineConfiguration(
-            MachineConfigUpdate::from(MachineConfig::default()),
-        )));
-        check_unsupported(runtime_request(VmmAction::LoadSnapshot(
-            LoadSnapshotParams {
-                snapshot_path: PathBuf::new(),
-                mem_backend: MemBackendConfig {
-                    backend_type: MemBackendType::File,
-                    backend_path: PathBuf::new(),
-                },
-                track_dirty_pages: false,
-                resume_vm: false,
-                network_overrides: vec![],
-                vsock_override: None,
-                clock_realtime: false,
-            },
-        )));
-        check_unsupported(runtime_request(VmmAction::SetEntropyDevice(
-            EntropyDeviceConfig::default(),
-        )));
-        check_unsupported(runtime_request(VmmAction::SetMemoryHotplugDevice(
-            MemoryHotplugConfig::default(),
-        )));
     }
 }

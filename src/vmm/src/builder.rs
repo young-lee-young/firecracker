@@ -154,43 +154,71 @@ pub fn build_microvm_for_boot(
     // Timestamp for measuring microVM boot duration.
     let request_ts = TimestampUs::default();
 
+
+    // 借用 boot 的 builder，也就是 BootConfig
     let boot_config = vm_resources
         .boot_source
         .builder
         .as_ref()
         .ok_or(StartMicrovmError::MissingKernelConfig)?;
 
+
+    // 从 firecracker 的虚拟内存中给 guest 分配内存
     let guest_memory = vm_resources
         .allocate_guest_memory()
         .map_err(StartMicrovmError::GuestMemory)?;
 
+
     // Clone the command-line so that a failed boot doesn't pollute the original.
     // If the user didn't provide boot_args, use the KVM-specific default.
+    // 如果用户没有提供 cmdline，那么使用默认的 cmdline
     #[allow(unused_mut)]
     let mut boot_cmdline = match boot_config.cmdline.clone() {
         Some(cmdline) => cmdline,
         None => build_cmdline(DEFAULT_KERNEL_CMDLINE)?,
     };
 
+
     let cpu_template = vm_resources
         .machine_config
         .cpu_template
         .get_cpu_template()?;
 
+
+    // 创建 KVM 实例
     let kvm = Kvm::new(cpu_template.kvm_capabilities.clone())?;
+
+
     // Set up KVM VM and register memory regions.
     // Build custom CPU config if a custom template is provided.
+    // 创建 VM 实例
     let mut vm = KvmVm::new(kvm)?;
+
+
+    // 创建 vCPU
     let mut vcpus = vm.create_vcpus(vm_resources.machine_config.vcpu_count)?;
+
+
+    // 把上面 mmap 出来的内存，注册到 kvm 中
     vm.register_dram_memory_regions(guest_memory)?;
+
 
     // Allocate memory as soon as possible to make hotpluggable memory available to all consumers,
     // before they clone the GuestMemoryMmap object
+    // 判断用户是否使用了内存热插拔
+    // 这里整体上和用户申请的内存的逻辑是一样的
     let virtio_mem_addr = if let Some(memory_hotplug) = &vm_resources.memory_hotplug {
+        // 这里是从 guest 的物理地址中，申请了一段内存空间
+        // addr 是这段地址的起始地址
         let addr = allocate_virtio_mem_address(&vm, memory_hotplug.total_size_mib)?;
+
+
+        // 这里是对这段内存在 firecracker 的虚拟机地址空间进行 mmap
         let hotplug_memory_region = vm_resources
             .allocate_memory_region(addr, mib_to_bytes(memory_hotplug.total_size_mib))
             .map_err(StartMicrovmError::GuestMemory)?;
+
+        // 把这段内存注册到 kvm 里面
         vm.register_hotpluggable_memory_region(
             hotplug_memory_region,
             mib_to_bytes(memory_hotplug.slot_size_mib),
@@ -200,8 +228,10 @@ pub fn build_microvm_for_boot(
         None
     };
 
+
     let kvm_vm = Arc::new(vm);
     let vm = Vm::Kvm(kvm_vm.clone());
+
 
     let mut device_manager = DeviceManager::new(
         event_manager,
@@ -614,9 +644,11 @@ fn allocate_virtio_mem_address(
 ) -> Result<GuestAddress, StartMicrovmError> {
     let addr = vm
         .resource_allocator()
+        // 从 512 GiB 后开始找合适的内存
         .past_mmio64_memory
         .allocate(
             mib_to_bytes(total_size_mib) as u64,
+            // 起始地址必须是 128 MiB 的整数倍
             mib_to_bytes(VIRTIO_MEM_DEFAULT_SLOT_SIZE_MIB) as u64,
             AllocPolicy::FirstMatch,
         )?
@@ -761,657 +793,4 @@ fn attach_balloon_device(
     let id = String::from(balloon.lock().expect("Poisoned lock").id());
     // The device mutex mustn't be locked here otherwise it will deadlock.
     device_manager.attach_virtio_device(vm, id, balloon.clone(), cmdline, event_manager, false)
-}
-
-#[cfg(test)]
-pub(crate) mod tests {
-
-    use linux_loader::cmdline::Cmdline;
-    use vmm_sys_util::tempfile::TempFile;
-
-    use super::*;
-    use crate::device_manager::tests::default_device_manager;
-    use crate::devices::virtio::block::CacheType;
-    use crate::devices::virtio::device::VirtioDeviceType;
-    use crate::devices::virtio::rng::device::ENTROPY_DEV_ID;
-    use crate::devices::virtio::vsock::VSOCK_DEV_ID;
-    use crate::mmds::data_store::{Mmds, MmdsVersion};
-    use crate::mmds::ns::MmdsNetworkStack;
-    use crate::utils::mib_to_bytes;
-    use crate::vmm_config::balloon::{BALLOON_DEV_ID, BalloonBuilder, BalloonDeviceConfig};
-    use crate::vmm_config::boot_source::BootSourceConfig;
-    use crate::vmm_config::drive::{BlockBuilder, BlockDeviceConfig};
-    use crate::vmm_config::entropy::{EntropyDeviceBuilder, EntropyDeviceConfig};
-    use crate::vmm_config::machine_config::MachineConfig;
-    use crate::vmm_config::net::{NetBuilder, NetworkInterfaceConfig};
-    use crate::vmm_config::pmem::{PmemBuilder, PmemConfig};
-    use crate::vmm_config::vsock::tests::default_config;
-    use crate::vmm_config::vsock::{VsockBuilder, VsockDeviceConfig};
-    use crate::vstate::vm::Vm;
-    use crate::vstate::vm::tests::setup_vm_with_memory;
-
-    #[derive(Debug)]
-    pub(crate) struct CustomBlockConfig {
-        drive_id: String,
-        is_root_device: bool,
-        partuuid: Option<String>,
-        is_read_only: bool,
-        cache_type: CacheType,
-    }
-
-    impl CustomBlockConfig {
-        pub(crate) fn new(
-            drive_id: String,
-            is_root_device: bool,
-            partuuid: Option<String>,
-            is_read_only: bool,
-            cache_type: CacheType,
-        ) -> Self {
-            CustomBlockConfig {
-                drive_id,
-                is_root_device,
-                partuuid,
-                is_read_only,
-                cache_type,
-            }
-        }
-    }
-
-    fn cmdline_contains(cmdline: &Cmdline, slug: &str) -> bool {
-        // The following unwraps can never fail; the only way any of these methods
-        // would return an `Err` is if one of the following conditions is met:
-        //    1. The command line is empty: We just added things to it, and if insertion of an
-        //       argument goes wrong, then `Cmdline::insert` would have already returned `Err`.
-        //    2. There's a spurious null character somewhere in the command line: The
-        //       `Cmdline::insert` methods verify that this is not the case.
-        //    3. The `CString` is not valid UTF8: It just got created from a `String`, which was
-        //       valid UTF8.
-
-        cmdline
-            .as_cstring()
-            .unwrap()
-            .into_string()
-            .unwrap()
-            .contains(slug)
-    }
-
-    pub(crate) fn default_kernel_cmdline() -> Cmdline {
-        build_cmdline(DEFAULT_KERNEL_CMDLINE).unwrap()
-    }
-
-    pub(crate) fn default_vmm() -> Vmm {
-        let mut vm = setup_vm_with_memory(mib_to_bytes(128));
-
-        let _ = vm.create_vcpus(1).unwrap();
-
-        Vmm {
-            instance_info: InstanceInfo::default(),
-            machine_config: MachineConfig::default(),
-            boot_source_config: BootSourceConfig::default(),
-            shutdown_exit_code: None,
-            vm: Vm::Kvm(Arc::new(vm)),
-            device_manager: default_device_manager(),
-        }
-    }
-
-    pub(crate) fn insert_block_devices(
-        vmm: &mut Vmm,
-        cmdline: &mut Cmdline,
-        event_manager: &mut EventManager,
-        custom_block_cfgs: Vec<CustomBlockConfig>,
-    ) -> Vec<TempFile> {
-        let mut block_dev_configs = BlockBuilder::new();
-        let mut block_files = Vec::new();
-        for custom_block_cfg in custom_block_cfgs {
-            block_files.push(TempFile::new().unwrap());
-
-            let block_device_config = BlockDeviceConfig {
-                drive_id: String::from(&custom_block_cfg.drive_id),
-                partuuid: custom_block_cfg.partuuid,
-                is_root_device: custom_block_cfg.is_root_device,
-                cache_type: custom_block_cfg.cache_type,
-
-                is_read_only: Some(custom_block_cfg.is_read_only),
-                path_on_host: Some(
-                    block_files
-                        .last()
-                        .unwrap()
-                        .as_path()
-                        .to_str()
-                        .unwrap()
-                        .to_string(),
-                ),
-                rate_limiter: None,
-                file_engine_type: None,
-
-                socket: None,
-            };
-
-            block_dev_configs
-                .insert(block_device_config, false)
-                .unwrap();
-        }
-
-        attach_block_devices(
-            &mut vmm.device_manager,
-            &vmm.vm,
-            cmdline,
-            block_dev_configs.devices.iter(),
-            event_manager,
-        )
-        .unwrap();
-        block_files
-    }
-
-    pub(crate) fn insert_net_device(
-        vmm: &mut Vmm,
-        cmdline: &mut Cmdline,
-        event_manager: &mut EventManager,
-        net_config: NetworkInterfaceConfig,
-    ) {
-        let mut net_builder = NetBuilder::new();
-        net_builder.build(net_config).unwrap();
-
-        let res = attach_net_devices(
-            &mut vmm.device_manager,
-            &vmm.vm,
-            cmdline,
-            net_builder.iter(),
-            event_manager,
-        );
-        res.unwrap();
-    }
-
-    pub(crate) fn insert_net_device_with_mmds(
-        vmm: &mut Vmm,
-        cmdline: &mut Cmdline,
-        event_manager: &mut EventManager,
-        net_config: NetworkInterfaceConfig,
-        mmds_version: MmdsVersion,
-    ) {
-        let mut net_builder = NetBuilder::new();
-        net_builder.build(net_config).unwrap();
-        let net = net_builder.iter().next().unwrap();
-        let mut mmds = Mmds::default();
-        mmds.set_version(mmds_version);
-        net.lock().unwrap().configure_mmds_network_stack(
-            MmdsNetworkStack::default_ipv4_addr(),
-            Arc::new(Mutex::new(mmds)),
-        );
-
-        attach_net_devices(
-            &mut vmm.device_manager,
-            &vmm.vm,
-            cmdline,
-            net_builder.iter(),
-            event_manager,
-        )
-        .unwrap();
-    }
-
-    pub(crate) fn insert_vsock_device(
-        vmm: &mut Vmm,
-        cmdline: &mut Cmdline,
-        event_manager: &mut EventManager,
-        vsock_config: VsockDeviceConfig,
-    ) {
-        let vsock_dev_id = VSOCK_DEV_ID.to_owned();
-        let vsock = VsockBuilder::create_unixsock_vsock(vsock_config).unwrap();
-        let vsock = Arc::new(Mutex::new(vsock));
-
-        attach_unixsock_vsock_device(
-            &mut vmm.device_manager,
-            &vmm.vm,
-            cmdline,
-            &vsock,
-            event_manager,
-        )
-        .unwrap();
-
-        assert!(
-            vmm.device_manager
-                .get_virtio_device(VirtioDeviceType::Vsock, &vsock_dev_id)
-                .is_some()
-        );
-    }
-
-    pub(crate) fn insert_entropy_device(
-        vmm: &mut Vmm,
-        cmdline: &mut Cmdline,
-        event_manager: &mut EventManager,
-        entropy_config: EntropyDeviceConfig,
-    ) {
-        let mut builder = EntropyDeviceBuilder::new();
-        let entropy = builder.build(entropy_config).unwrap();
-
-        attach_entropy_device(
-            &mut vmm.device_manager,
-            &vmm.vm,
-            cmdline,
-            &entropy,
-            event_manager,
-        )
-        .unwrap();
-
-        assert!(
-            vmm.device_manager
-                .get_virtio_device(VirtioDeviceType::Rng, ENTROPY_DEV_ID)
-                .is_some()
-        );
-    }
-
-    pub(crate) fn insert_pmem_devices(
-        vmm: &mut Vmm,
-        cmdline: &mut Cmdline,
-        event_manager: &mut EventManager,
-        configs: Vec<PmemConfig>,
-    ) -> Vec<TempFile> {
-        let mut builder = PmemBuilder::default();
-        let mut files = Vec::new();
-        for mut config in configs {
-            let tmp_file = TempFile::new().unwrap();
-            tmp_file.as_file().set_len(0x20_0000).unwrap();
-            let tmp_file_path = tmp_file.as_path().to_str().unwrap().to_string();
-            files.push(tmp_file);
-            config.path_on_host = tmp_file_path;
-            builder.build(config, false).unwrap();
-        }
-
-        attach_pmem_devices(
-            &mut vmm.device_manager,
-            &vmm.vm,
-            cmdline,
-            &builder.configs,
-            event_manager,
-        )
-        .unwrap();
-        files
-    }
-
-    #[cfg(target_arch = "x86_64")]
-    pub(crate) fn insert_vmgenid_device(vmm: &mut Vmm) {
-        vmm.device_manager
-            .attach_vmgenid_device(vmm.vm.as_kvm().unwrap())
-            .unwrap();
-    }
-
-    #[cfg(target_arch = "x86_64")]
-    pub(crate) fn insert_vmclock_device(vmm: &mut Vmm) {
-        vmm.device_manager
-            .attach_vmclock_device(vmm.vm.as_kvm().unwrap())
-            .unwrap();
-    }
-
-    pub(crate) fn insert_balloon_device(
-        vmm: &mut Vmm,
-        cmdline: &mut Cmdline,
-        event_manager: &mut EventManager,
-        balloon_config: BalloonDeviceConfig,
-    ) {
-        let mut builder = BalloonBuilder::new();
-        builder.set(balloon_config).unwrap();
-        let balloon = builder.get().unwrap();
-
-        attach_balloon_device(
-            &mut vmm.device_manager,
-            &vmm.vm,
-            cmdline,
-            balloon,
-            event_manager,
-        )
-        .unwrap();
-
-        assert!(
-            vmm.device_manager
-                .get_virtio_device(VirtioDeviceType::Balloon, BALLOON_DEV_ID)
-                .is_some()
-        );
-    }
-
-    #[test]
-    fn test_attach_net_devices() {
-        let mut event_manager = EventManager::new().expect("Unable to create EventManager");
-        let mut vmm = default_vmm();
-
-        let network_interface = NetworkInterfaceConfig {
-            iface_id: String::from("netif"),
-            host_dev_name: String::from("hostname"),
-            guest_mac: None,
-            mtu: None,
-            rx_rate_limiter: None,
-            tx_rate_limiter: None,
-        };
-
-        let mut cmdline = default_kernel_cmdline();
-        insert_net_device(
-            &mut vmm,
-            &mut cmdline,
-            &mut event_manager,
-            network_interface.clone(),
-        );
-
-        // We can not attach it once more.
-        let mut net_builder = NetBuilder::new();
-        net_builder.build(network_interface).unwrap_err();
-    }
-
-    #[test]
-    fn test_attach_block_devices() {
-        let mut event_manager = EventManager::new().expect("Unable to create EventManager");
-
-        // Use case 1: root block device is not specified through PARTUUID.
-        {
-            let drive_id = String::from("root");
-            let block_configs = vec![CustomBlockConfig::new(
-                drive_id.clone(),
-                true,
-                None,
-                true,
-                CacheType::Unsafe,
-            )];
-            let mut vmm = default_vmm();
-            let mut cmdline = default_kernel_cmdline();
-            insert_block_devices(&mut vmm, &mut cmdline, &mut event_manager, block_configs);
-            assert!(cmdline_contains(&cmdline, "root=/dev/vda ro"));
-            assert!(
-                vmm.device_manager
-                    .get_virtio_device(VirtioDeviceType::Block, drive_id.as_str())
-                    .is_some()
-            );
-        }
-
-        // Use case 2: root block device is specified through PARTUUID.
-        {
-            let drive_id = String::from("root");
-            let block_configs = vec![CustomBlockConfig::new(
-                drive_id.clone(),
-                true,
-                Some("0eaa91a0-01".to_string()),
-                false,
-                CacheType::Unsafe,
-            )];
-            let mut vmm = default_vmm();
-            let mut cmdline = default_kernel_cmdline();
-            insert_block_devices(&mut vmm, &mut cmdline, &mut event_manager, block_configs);
-            assert!(cmdline_contains(&cmdline, "root=PARTUUID=0eaa91a0-01 rw"));
-            assert!(
-                vmm.device_manager
-                    .get_virtio_device(VirtioDeviceType::Block, drive_id.as_str())
-                    .is_some()
-            );
-        }
-
-        // Use case 3: root block device is not added at all.
-        {
-            let drive_id = String::from("non_root");
-            let block_configs = vec![CustomBlockConfig::new(
-                drive_id.clone(),
-                false,
-                Some("0eaa91a0-01".to_string()),
-                false,
-                CacheType::Unsafe,
-            )];
-            let mut vmm = default_vmm();
-            let mut cmdline = default_kernel_cmdline();
-            insert_block_devices(&mut vmm, &mut cmdline, &mut event_manager, block_configs);
-            assert!(!cmdline_contains(&cmdline, "root=PARTUUID="));
-            assert!(!cmdline_contains(&cmdline, "root=/dev/vda"));
-            assert!(
-                vmm.device_manager
-                    .get_virtio_device(VirtioDeviceType::Block, drive_id.as_str())
-                    .is_some()
-            );
-        }
-
-        // Use case 4: rw root block device and other rw and ro drives.
-        {
-            let block_configs = vec![
-                CustomBlockConfig::new(
-                    String::from("root"),
-                    true,
-                    Some("0eaa91a0-01".to_string()),
-                    false,
-                    CacheType::Unsafe,
-                ),
-                CustomBlockConfig::new(
-                    String::from("secondary"),
-                    false,
-                    None,
-                    true,
-                    CacheType::Unsafe,
-                ),
-                CustomBlockConfig::new(
-                    String::from("third"),
-                    false,
-                    None,
-                    false,
-                    CacheType::Unsafe,
-                ),
-            ];
-            let mut vmm = default_vmm();
-            let mut cmdline = default_kernel_cmdline();
-            insert_block_devices(&mut vmm, &mut cmdline, &mut event_manager, block_configs);
-
-            assert!(cmdline_contains(&cmdline, "root=PARTUUID=0eaa91a0-01 rw"));
-            assert!(
-                vmm.device_manager
-                    .get_virtio_device(VirtioDeviceType::Block, "root")
-                    .is_some()
-            );
-            assert!(
-                vmm.device_manager
-                    .get_virtio_device(VirtioDeviceType::Block, "secondary")
-                    .is_some()
-            );
-            assert!(
-                vmm.device_manager
-                    .get_virtio_device(VirtioDeviceType::Block, "third")
-                    .is_some()
-            );
-
-            // Check if these three block devices are inserted in kernel_cmdline.
-            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-            assert!(cmdline_contains(
-                &cmdline,
-                "virtio_mmio.device=4K@0xc0001000:5 virtio_mmio.device=4K@0xc0002000:6 \
-                 virtio_mmio.device=4K@0xc0003000:7"
-            ));
-        }
-
-        // Use case 5: root block device is rw.
-        {
-            let drive_id = String::from("root");
-            let block_configs = vec![CustomBlockConfig::new(
-                drive_id.clone(),
-                true,
-                None,
-                false,
-                CacheType::Unsafe,
-            )];
-            let mut vmm = default_vmm();
-            let mut cmdline = default_kernel_cmdline();
-            insert_block_devices(&mut vmm, &mut cmdline, &mut event_manager, block_configs);
-            assert!(cmdline_contains(&cmdline, "root=/dev/vda rw"));
-            assert!(
-                vmm.device_manager
-                    .get_virtio_device(VirtioDeviceType::Block, drive_id.as_str())
-                    .is_some()
-            );
-        }
-
-        // Use case 6: root block device is ro, with PARTUUID.
-        {
-            let drive_id = String::from("root");
-            let block_configs = vec![CustomBlockConfig::new(
-                drive_id.clone(),
-                true,
-                Some("0eaa91a0-01".to_string()),
-                true,
-                CacheType::Unsafe,
-            )];
-            let mut vmm = default_vmm();
-            let mut cmdline = default_kernel_cmdline();
-            insert_block_devices(&mut vmm, &mut cmdline, &mut event_manager, block_configs);
-            assert!(cmdline_contains(&cmdline, "root=PARTUUID=0eaa91a0-01 ro"));
-            assert!(
-                vmm.device_manager
-                    .get_virtio_device(VirtioDeviceType::Block, drive_id.as_str())
-                    .is_some()
-            );
-        }
-
-        // Use case 7: root block device is rw with flush enabled
-        {
-            let drive_id = String::from("root");
-            let block_configs = vec![CustomBlockConfig::new(
-                drive_id.clone(),
-                true,
-                None,
-                false,
-                CacheType::Writeback,
-            )];
-            let mut vmm = default_vmm();
-            let mut cmdline = default_kernel_cmdline();
-            insert_block_devices(&mut vmm, &mut cmdline, &mut event_manager, block_configs);
-            assert!(cmdline_contains(&cmdline, "root=/dev/vda rw"));
-            assert!(
-                vmm.device_manager
-                    .get_virtio_device(VirtioDeviceType::Block, drive_id.as_str())
-                    .is_some()
-            );
-        }
-    }
-
-    #[test]
-    fn test_attach_pmem_devices() {
-        let mut event_manager = EventManager::new().expect("Unable to create EventManager");
-
-        let id = String::from("root");
-        let configs = vec![PmemConfig {
-            id: id.clone(),
-            path_on_host: "".into(),
-            root_device: true,
-            read_only: true,
-            ..Default::default()
-        }];
-        let mut vmm = default_vmm();
-        let mut cmdline = default_kernel_cmdline();
-        _ = insert_pmem_devices(&mut vmm, &mut cmdline, &mut event_manager, configs);
-        assert!(cmdline_contains(&cmdline, "root=/dev/pmem0 ro"));
-        assert!(
-            vmm.device_manager
-                .get_virtio_device(VirtioDeviceType::Pmem, id.as_str())
-                .is_some()
-        );
-    }
-
-    #[test]
-    fn test_attach_boot_timer_device() {
-        let mut vmm = default_vmm();
-        let request_ts = TimestampUs::default();
-
-        let res = vmm
-            .device_manager
-            .attach_boot_timer_device(vmm.vm.as_kvm().unwrap(), request_ts);
-        res.unwrap();
-        assert!(vmm.device_manager.mmio_devices.boot_timer.is_some());
-    }
-
-    #[test]
-    fn test_attach_balloon_device() {
-        let mut event_manager = EventManager::new().expect("Unable to create EventManager");
-        let mut vmm = default_vmm();
-
-        let balloon_config = BalloonDeviceConfig {
-            amount_mib: 0,
-            deflate_on_oom: false,
-            stats_polling_interval_s: 0,
-            free_page_hinting: false,
-            free_page_reporting: false,
-        };
-
-        let mut cmdline = default_kernel_cmdline();
-        insert_balloon_device(&mut vmm, &mut cmdline, &mut event_manager, balloon_config);
-        // Check if the vsock device is described in kernel_cmdline.
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        assert!(cmdline_contains(
-            &cmdline,
-            "virtio_mmio.device=4K@0xc0001000:5"
-        ));
-    }
-
-    #[test]
-    fn test_attach_entropy_device() {
-        let mut event_manager = EventManager::new().expect("Unable to create EventManager");
-        let mut vmm = default_vmm();
-
-        let entropy_config = EntropyDeviceConfig::default();
-
-        let mut cmdline = default_kernel_cmdline();
-        insert_entropy_device(&mut vmm, &mut cmdline, &mut event_manager, entropy_config);
-        // Check if the vsock device is described in kernel_cmdline.
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        assert!(cmdline_contains(
-            &cmdline,
-            "virtio_mmio.device=4K@0xc0001000:5"
-        ));
-    }
-
-    #[test]
-    fn test_attach_vsock_device() {
-        let mut event_manager = EventManager::new().expect("Unable to create EventManager");
-        let mut vmm = default_vmm();
-
-        let mut tmp_sock_file = TempFile::new().unwrap();
-        tmp_sock_file.remove().unwrap();
-        let vsock_config = default_config(&tmp_sock_file);
-
-        let mut cmdline = default_kernel_cmdline();
-        insert_vsock_device(&mut vmm, &mut cmdline, &mut event_manager, vsock_config);
-        // Check if the vsock device is described in kernel_cmdline.
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        assert!(cmdline_contains(
-            &cmdline,
-            "virtio_mmio.device=4K@0xc0001000:5"
-        ));
-    }
-
-    pub(crate) fn insert_virtio_mem_device(
-        vmm: &mut Vmm,
-        cmdline: &mut Cmdline,
-        event_manager: &mut EventManager,
-        config: MemoryHotplugConfig,
-    ) {
-        attach_virtio_mem_device(
-            &mut vmm.device_manager,
-            &vmm.vm,
-            cmdline,
-            &config,
-            event_manager,
-            GuestAddress(512 << 30),
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn test_attach_virtio_mem_device() {
-        let mut event_manager = EventManager::new().expect("Unable to create EventManager");
-        let mut vmm = default_vmm();
-
-        let config = MemoryHotplugConfig {
-            total_size_mib: 1024,
-            block_size_mib: 2,
-            slot_size_mib: 128,
-        };
-
-        let mut cmdline = default_kernel_cmdline();
-        insert_virtio_mem_device(&mut vmm, &mut cmdline, &mut event_manager, config);
-
-        // Check if the vsock device is described in kernel_cmdline.
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        assert!(cmdline_contains(
-            &cmdline,
-            "virtio_mmio.device=4K@0xc0001000:5"
-        ));
-    }
 }

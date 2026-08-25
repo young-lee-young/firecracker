@@ -10,7 +10,6 @@ compile_error!(
 mod api_server;
 mod api_server_adapter;
 mod generated;
-mod metrics;
 mod seccomp;
 
 use std::fs::{self, File};
@@ -304,6 +303,7 @@ fn main_exec() -> Result<(), MainError> {
         return Ok(());
     }
 
+    // 校验实例 ID 的合法性
     // It's safe to unwrap here because the field's been provided with a default value.
     let instance_id = arguments.single_value("id").unwrap();
     validate_instance_id(instance_id.as_str()).expect("Invalid instance ID");
@@ -338,8 +338,10 @@ fn main_exec() -> Result<(), MainError> {
          security-critical randomness and relaxes error handling. DO NOT use in production."
     );
 
+    // 注册信号处理的方法
     register_signal_handlers().map_err(MainError::RegisterSignalHandlers)?;
 
+    // TODO Lee P2 resize_fdtable 方法是在做什么
     #[cfg(target_arch = "aarch64")]
     enable_ssbd_mitigation();
 
@@ -633,10 +635,6 @@ fn run_without_api(
 ) -> Result<(), RunWithoutApiError> {
     let mut event_manager = EventManager::new().expect("Unable to create EventManager");
 
-    // Create the firecracker metrics object responsible for periodically printing metrics.
-    let firecracker_metrics = Arc::new(Mutex::new(metrics::PeriodicMetrics::new()));
-    event_manager.add_subscriber(firecracker_metrics.clone());
-
     // Build the microVm. We can ignore VmResources since it's not used without api.
     let vmm = build_microvm_from_json(
         seccomp_filters,
@@ -658,12 +656,6 @@ fn run_without_api(
             .ok_or(RunWithoutApiError::MissingSeccompFilter)?,
     )
     .map_err(RunWithoutApiError::SeccompFilter)?;
-
-    // Start the metrics.
-    firecracker_metrics
-        .lock()
-        .expect("Poisoned lock")
-        .start(metrics::WRITE_METRICS_PERIOD_MS);
 
     // Run the EventManager that drives everything in the microVM.
     loop {

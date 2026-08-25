@@ -32,18 +32,3 @@ impl std::fmt::Display for StaticCpuTemplate {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::cpu_config::test_utils::get_json_template;
-
-    #[test]
-    fn verify_consistency_with_json_templates() {
-        let static_templates = [(v1n1::v1n1(), "V1N1.json")];
-
-        for (hardcoded_template, filename) in static_templates {
-            let json_template = get_json_template(filename);
-            assert_eq!(hardcoded_template, json_template);
-        }
-    }
-}

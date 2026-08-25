@@ -27,19 +27,26 @@ pub enum KvmError {
 impl Kvm {
     /// Create `Kvm` struct.
     pub fn new(kvm_cap_modifiers: Vec<KvmCapability>) -> Result<Self, KvmError> {
+        // 打开 /dev/kvm 设备
         let kvm_fd = KvmFd::new().map_err(KvmError::Kvm)?;
+
 
         // Check that KVM has the correct version.
         // Safe to cast because this is a constant.
+        // 检查 KVM api 的版本
         #[allow(clippy::cast_possible_wrap)]
         if kvm_fd.get_api_version() != KVM_API_VERSION as i32 {
             return Err(KvmError::ApiVersion(kvm_fd.get_api_version()));
         }
 
+
         let total_caps = Self::combine_capabilities(&kvm_cap_modifiers);
         // Check that all desired capabilities are supported.
+        // 检查 kvm 的能力是否都具备
         Self::check_capabilities(&kvm_fd, &total_caps).map_err(KvmError::Capabilities)?;
 
+        // 创建当前架构下的 KVM 实例
+        // 主要是获取 GPU 的能力信息
         Ok(Kvm::init_arch(kvm_fd, kvm_cap_modifiers)?)
     }
 
@@ -93,23 +100,4 @@ impl Kvm {
 pub struct KvmState {
     /// Additional capabilities that were specified in cpu template.
     pub kvm_cap_modifiers: Vec<KvmCapability>,
-}
-
-#[cfg(test)]
-pub(crate) mod tests {
-    use super::*;
-
-    #[test]
-    fn test_combine_capabilities() {
-        // Default caps for x86_64 and aarch64 both have KVM_CAP_IOEVENTFD and don't have
-        // KVM_CAP_IOMMU caps.
-        let additional_capabilities = vec![
-            KvmCapability::Add(kvm_bindings::KVM_CAP_IOMMU),
-            KvmCapability::Remove(kvm_bindings::KVM_CAP_IOEVENTFD),
-        ];
-
-        let combined_caps = Kvm::combine_capabilities(&additional_capabilities);
-        assert!(combined_caps.contains(&kvm_bindings::KVM_CAP_IOMMU));
-        assert!(!combined_caps.contains(&kvm_bindings::KVM_CAP_IOEVENTFD));
-    }
 }

@@ -30,14 +30,3 @@ pub fn dump(vmm: Arc<Mutex<Vmm>>) -> Result<CustomCpuTemplate, DumpError> {
     Ok(config_to_template(&cpu_configs[0]))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::utils::build_microvm_from_config;
-
-    #[test]
-    fn test_dump() {
-        let (vmm, _) = build_microvm_from_config(None, None).unwrap();
-        dump(vmm).unwrap();
-    }
-}

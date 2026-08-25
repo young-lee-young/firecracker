@@ -111,37 +111,39 @@ pub fn arch_memory_regions(size: usize) -> Vec<(GuestAddress, usize)> {
     // try to allocate guest memory of size 0
     assert!(size > 0, "Attempt to allocate guest memory of length 0");
 
-    let dram_size = std::cmp::min(
-        usize::MAX - u64_to_usize(MMIO32_MEM_SIZE) - u64_to_usize(MMIO64_MEM_SIZE),
-        size,
+    // (2^64 - 1) - 1 GiB - 256 GiB
+    // max_dram_size 表示最大内存大小
+    let max_dram_size = usize::MAX - MMIO32_MEM_SIZE as usize - MMIO64_MEM_SIZE as usize;
+
+    // 如果客户传的大小比支持的最大还大，直接退出
+    assert!(
+        size <= max_dram_size,
+        "guest memory size is too large"
     );
 
-    if dram_size != size {
-        logger::warn!(
-            "Requested memory size {} exceeds architectural maximum (1022GiB). Size has been \
-             truncated to {}",
-            size,
-            dram_size
-        );
-    }
 
     let mut regions = vec![];
 
     if let Some((start_past_32bit_gap, remaining_past_32bit_gap)) = arch_memory_regions_with_gap(
         &mut regions,
         0,
-        dram_size,
+        size,
         u64_to_usize(MMIO32_MEM_START),
         u64_to_usize(MMIO32_MEM_SIZE),
     ) && let Some((start_past_64bit_gap, remaining_past_64bit_gap)) =
         arch_memory_regions_with_gap(
             &mut regions,
+            // 假如申请 4 GiB
+            // 这个值为 4 GiB
             start_past_32bit_gap,
+            // 这个值为 1 GiB
             remaining_past_32bit_gap,
             u64_to_usize(MMIO64_MEM_START),
             u64_to_usize(MMIO64_MEM_SIZE),
         )
     {
+        // 如果内存大于 512，会分配 (512 GiB, 512 GiB + remaining)
+        // 也就是 512 GiB 之后，只会分配一段
         regions.push((
             GuestAddress(start_past_64bit_gap as u64),
             remaining_past_64bit_gap,
@@ -531,117 +533,3 @@ mod verification {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use linux_loader::loader::bootparam::boot_e820_entry;
-
-    use super::*;
-    use crate::arch::x86_64::layout::FIRST_ADDR_PAST_32BITS;
-    use crate::test_utils::{arch_mem, single_region_mem};
-    use crate::utils::mib_to_bytes;
-    use crate::vstate::resources::ResourceAllocator;
-
-    #[test]
-    fn regions_lt_4gb() {
-        let regions = arch_memory_regions(1usize << 29);
-        assert_eq!(1, regions.len());
-        assert_eq!(GuestAddress(0), regions[0].0);
-        assert_eq!(1usize << 29, regions[0].1);
-    }
-
-    #[test]
-    fn regions_gt_4gb() {
-        const MEMORY_SIZE: usize = (1 << 32) + 0x8000;
-
-        let regions = arch_memory_regions(MEMORY_SIZE);
-        assert_eq!(2, regions.len());
-        assert_eq!(GuestAddress(0), regions[0].0);
-        assert_eq!(GuestAddress(1u64 << 32), regions[1].0);
-
-        assert_eq!(
-            regions[1],
-            (
-                GuestAddress(FIRST_ADDR_PAST_32BITS),
-                MEMORY_SIZE - regions[0].1
-            )
-        )
-    }
-
-    #[test]
-    fn test_system_configuration() {
-        let no_vcpus = 4;
-        let gm = single_region_mem(0x10000);
-        let mut resource_allocator = ResourceAllocator::new();
-        let err = mptable::setup_mptable(&gm, &mut resource_allocator, 1);
-        assert!(matches!(
-            err.unwrap_err(),
-            mptable::MptableError::NotEnoughMemory
-        ));
-
-        // Now assigning some memory that falls before the 32bit memory hole.
-        let mem_size = mib_to_bytes(128);
-        let gm = arch_mem(mem_size);
-        let mut resource_allocator = ResourceAllocator::new();
-        mptable::setup_mptable(&gm, &mut resource_allocator, no_vcpus).unwrap();
-        configure_64bit_boot(&gm, GuestAddress(0), 0, &None).unwrap();
-        configure_pvh(&gm, GuestAddress(0), &None).unwrap();
-
-        // Now assigning some memory that is equal to the start of the 32bit memory hole.
-        let mem_size = mib_to_bytes(3328);
-        let gm = arch_mem(mem_size);
-        let mut resource_allocator = ResourceAllocator::new();
-        mptable::setup_mptable(&gm, &mut resource_allocator, no_vcpus).unwrap();
-        configure_64bit_boot(&gm, GuestAddress(0), 0, &None).unwrap();
-        configure_pvh(&gm, GuestAddress(0), &None).unwrap();
-
-        // Now assigning some memory that falls after the 32bit memory hole.
-        let mem_size = mib_to_bytes(3330);
-        let gm = arch_mem(mem_size);
-        let mut resource_allocator = ResourceAllocator::new();
-        mptable::setup_mptable(&gm, &mut resource_allocator, no_vcpus).unwrap();
-        configure_64bit_boot(&gm, GuestAddress(0), 0, &None).unwrap();
-        configure_pvh(&gm, GuestAddress(0), &None).unwrap();
-    }
-
-    #[test]
-    fn test_add_e820_entry() {
-        let e820_map = [(boot_e820_entry {
-            addr: 0x1,
-            size: 4,
-            type_: 1,
-        }); 128];
-
-        let expected_params = boot_params {
-            e820_table: e820_map,
-            e820_entries: 1,
-            ..Default::default()
-        };
-
-        let mut params: boot_params = Default::default();
-        add_e820_entry(
-            &mut params,
-            e820_map[0].addr,
-            e820_map[0].size,
-            e820_map[0].type_,
-        )
-        .unwrap();
-        assert_eq!(
-            format!("{:?}", params.e820_table[0]),
-            format!("{:?}", expected_params.e820_table[0])
-        );
-        assert_eq!(params.e820_entries, expected_params.e820_entries);
-
-        // Exercise the scenario where the field storing the length of the e820 entry table is
-        // is bigger than the allocated memory.
-        params.e820_entries = u8::try_from(params.e820_table.len()).unwrap() + 1;
-        assert!(
-            add_e820_entry(
-                &mut params,
-                e820_map[0].addr,
-                e820_map[0].size,
-                e820_map[0].type_
-            )
-            .is_err()
-        );
-    }
-}

@@ -124,16 +124,47 @@ fn arch_memory_regions_with_gap(
     // 0-sized gaps don't really make sense. We should never receive such a gap.
     assert!(gap_size > 0);
 
+    // 首先要明确，这里的计算的地址都是 guest 物理地址
+
+    // 第一次
+    // gap_start：3 GiB
+    // gap_size：1 GiB
+    //                                    gap_start
+    // |           |            |            |              |
+    //                                            gap_size
+    // first_addr_past_gap：3 GiB + 1 GiB = 4 GiB
+
+    // 第二次
+    // gap_start: 256 GiB
+    // gap_size: 256 GiB
+    // first_addr_past_gap：256 GiB + 256 GiB = 512 GiB
     let first_addr_past_gap = gap_start + gap_size;
+
+    // 第一次
+    // region_start：0 GiB，region_size 4 GiB，gap_start 3 GiB
+    // 第二次
+    // region_start: 4 GiB, region_size 1 GiB, gap_start 256
     match (region_start + region_size).checked_sub(gap_start) {
         // case0: region fits all before gap
+        // 假如申请了 1 GiB，checked_sub 会返回 None，
         None | Some(0) => {
+            // 假如是 1 GiB
+            // GuestAddress: region_start 是 0 GiB，region_size 是 1 GiB，也就是 (0 GiB - 1 GiB)
+            // 假如是 4 GiB
+            // GuestAddress: region_start 是 4 GiB, region_size 是 1 GiB，也就是 (4 GiB - 5 GiB)
             regions.push((GuestAddress(region_start as u64), region_size));
+            // 返回 None
+            // 外层的 && let 不会继续执行第二次调用
             None
         }
         // case1: region starts before the gap and goes past it
+        // 假如申请了 4 GiB, checked_sub 会返回 remaining 为 1 GiB
+        // region_start 0 GiB, gap_start 3 GiB
         Some(remaining) if region_start < gap_start => {
+            // 第一次
+            // GuestAddress：region_start 是 0，region-size：3 GiB - 0 GiB，也就是 (0 GiB - 3 GiB)
             regions.push((GuestAddress(region_start as u64), gap_start - region_start));
+            // 第一次会返回 (4 GiB, 1 GiB)
             Some((first_addr_past_gap, remaining))
         }
         // case2: region starts past the gap

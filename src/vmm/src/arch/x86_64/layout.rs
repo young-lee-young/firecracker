@@ -38,6 +38,7 @@ pub const GSI_MSI_END: u32 = 4095;
 pub const GSI_MSI_NUM: u32 = GSI_MSI_END - GSI_MSI_START + 1;
 
 /// Address for the TSS setup.
+/// 这个地址是在 MMIO32 这个地址范围中的，也就是在 (3 GiB - 4 GiB) 地址中，靠近
 pub const KVM_TSS_ADDRESS: u64 = 0xfffb_d000;
 
 /// Address of the hvm_start_info struct used in PVH boot
@@ -92,11 +93,14 @@ pub const SYSTEM_MEM_START: u64 = 0x9fc00;
 pub const SYSTEM_MEM_SIZE: u64 = RSDP_ADDR - SYSTEM_MEM_START;
 
 /// First address that cannot be addressed using 32 bit anymore.
+/// 4 GiB
 pub const FIRST_ADDR_PAST_32BITS: u64 = 1 << 32;
 
 /// The size of the memory area reserved for MMIO 32-bit accesses.
+/// 1 GiB
 pub const MMIO32_MEM_SIZE: u64 = mib_to_bytes(1024) as u64;
 /// The start of the memory area reserved for MMIO 32-bit accesses.
+/// 4 GiB - 1GiB = 3GiB
 pub const MMIO32_MEM_START: u64 = FIRST_ADDR_PAST_32BITS - MMIO32_MEM_SIZE;
 
 // We dedicate the last 256 MiB of the 32-bit MMIO address space PCIe for memory-mapped access to
@@ -119,18 +123,28 @@ pub const MEM_32BIT_DEVICES_START: u64 = BOOT_DEVICE_MEM_START + MMIO_LEN;
 /// Size of memory region for device MMIO 32-bit accesses
 pub const MEM_32BIT_DEVICES_SIZE: u64 = PCI_MMCONFIG_START - MEM_32BIT_DEVICES_START;
 
+
 // 64-bits region for MMIO accesses
+// MMIO64 (256 GiB - 512 GiB)
 /// The start of the memory area reserved for MMIO 64-bit accesses.
+/// 256 GiB
 pub const MMIO64_MEM_START: u64 = 256 << 30;
 /// The size of the memory area reserved for MMIO 64-bit accesses.
+/// 256 GiB
 pub const MMIO64_MEM_SIZE: u64 = 256 << 30;
+
 
 // At the moment, all of this region goes to devices
 /// Beginning of memory region for device MMIO 64-bit accesses
 pub const MEM_64BIT_DEVICES_START: u64 = MMIO64_MEM_START;
 /// Size of memory region for device MMIO 32-bit accesses
 pub const MEM_64BIT_DEVICES_SIZE: u64 = MMIO64_MEM_SIZE;
+
+
+// PAST_64BITS_MMIO (512 GiB - 1024 GiB)
 /// First address past the 64-bit MMIO gap
+/// 从 512 GiB 开始的
 pub const FIRST_ADDR_PAST_64BITS_MMIO: u64 = MMIO64_MEM_START + MMIO64_MEM_SIZE;
+/// 512 GiB
 /// Size of the memory past 64-bit MMIO gap
 pub const PAST_64BITS_MMIO_SIZE: u64 = 512 << 30;

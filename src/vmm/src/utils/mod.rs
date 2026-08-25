@@ -46,6 +46,7 @@ pub const fn wrap_usize_to_u32(num: usize) -> Wrapping<u32> {
 
 /// Converts MiB to Bytes
 pub const fn mib_to_bytes(mib: usize) -> usize {
+    // 从 MiB 转成 Byte
     mib << MIB_TO_BYTES_SHIFT
 }
 

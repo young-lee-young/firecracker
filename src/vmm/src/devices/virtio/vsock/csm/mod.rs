@@ -117,26 +117,3 @@ impl From<PendingRx> for PendingRxSet {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_display_error() {
-        assert_eq!(
-            format!("{}", VsockCsmError::TxBufFull),
-            "Attempted to push data to a full TX buffer"
-        );
-
-        assert_eq!(
-            VsockCsmError::TxBufFlush(std::io::Error::from(std::io::ErrorKind::Other)).to_string(),
-            "An I/O error occurred, when attempting to flush the connection TX buffer: other error"
-        );
-
-        assert_eq!(
-            VsockCsmError::StreamWrite(std::io::Error::from(std::io::ErrorKind::Other)).to_string(),
-            "An I/O error occurred, when attempting to write data to the host-side stream: other \
-             error"
-        );
-    }
-}

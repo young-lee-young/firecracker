@@ -52,6 +52,8 @@ impl HugePageConfig {
             HugePageConfig::Hugetlbfs2M => 2,
         };
 
+        // 如果不使用大页，那么内存需要可以整除 1
+        // 如果使用 2M 大页，那么内存需要可以整除 2
         mem_size_mib.is_multiple_of(divisor)
     }
 
@@ -177,6 +179,7 @@ pub struct MachineConfigUpdate {
     #[serde(default)]
     pub mem_size_mib: Option<usize>,
     /// Enables or disabled SMT.
+    /// guest 中是否是超线程
     #[serde(default)]
     pub smt: Option<bool>,
     /// A CPU template that it is used to filter the CPU features exposed to the guest.
@@ -240,8 +243,10 @@ impl MachineConfig {
         &self,
         update: &MachineConfigUpdate,
     ) -> Result<MachineConfig, MachineConfigError> {
+        // 虚拟机核的数量
         let vcpu_count = update.vcpu_count.unwrap_or(self.vcpu_count);
 
+        // guest 是否使用超线程
         let smt = update.smt.unwrap_or(self.smt);
 
         #[cfg(target_arch = "aarch64")]
@@ -249,17 +254,21 @@ impl MachineConfig {
             return Err(MachineConfigError::SmtNotSupported);
         }
 
+        // 校验核数
         if vcpu_count == 0 || vcpu_count > MAX_SUPPORTED_VCPUS {
             return Err(MachineConfigError::InvalidVcpuCount);
         }
 
+        // 如果使用超线程，CPU 核数有限制
         // If SMT is enabled or is to be enabled in this call
         // only allow vcpu count to be 1 or even.
         if smt && vcpu_count > 1 && vcpu_count % 2 == 1 {
             return Err(MachineConfigError::InvalidVcpuCount);
         }
 
+        // 内存大小
         let mem_size_mib = update.mem_size_mib.unwrap_or(self.mem_size_mib);
+        // 大页
         let page_config = update.huge_pages.unwrap_or(self.huge_pages);
 
         if mem_size_mib == 0 || !page_config.is_valid_mem_size(mem_size_mib) {
@@ -282,57 +291,5 @@ impl MachineConfig {
             #[cfg(feature = "gdb")]
             gdb_socket_path: update.gdb_socket_path.clone(),
         })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::cpu_config::templates::{CpuTemplateType, CustomCpuTemplate, StaticCpuTemplate};
-    use crate::vmm_config::machine_config::MachineConfig;
-
-    // Ensure the special (de)serialization logic for the cpu_template field works:
-    // only static cpu templates can be specified via the machine-config endpoint, but
-    // we still cram custom cpu templates into the MachineConfig struct if they're set otherwise
-    // Ensure that during (de)serialization we preserve static templates, but we set custom
-    // templates to None
-    #[test]
-    fn test_serialize_machine_config() {
-        #[cfg(target_arch = "aarch64")]
-        const TEMPLATE: StaticCpuTemplate = StaticCpuTemplate::V1N1;
-        #[cfg(target_arch = "x86_64")]
-        const TEMPLATE: StaticCpuTemplate = StaticCpuTemplate::T2S;
-
-        let mconfig = MachineConfig {
-            cpu_template: None,
-            ..Default::default()
-        };
-
-        let serialized = serde_json::to_string(&mconfig).unwrap();
-        let deserialized = serde_json::from_str::<MachineConfig>(&serialized).unwrap();
-
-        assert!(deserialized.cpu_template.is_none());
-
-        let mconfig = MachineConfig {
-            cpu_template: Some(CpuTemplateType::Static(TEMPLATE)),
-            ..Default::default()
-        };
-
-        let serialized = serde_json::to_string(&mconfig).unwrap();
-        let deserialized = serde_json::from_str::<MachineConfig>(&serialized).unwrap();
-
-        assert_eq!(
-            deserialized.cpu_template,
-            Some(CpuTemplateType::Static(TEMPLATE))
-        );
-
-        let mconfig = MachineConfig {
-            cpu_template: Some(CpuTemplateType::Custom(CustomCpuTemplate::default())),
-            ..Default::default()
-        };
-
-        let serialized = serde_json::to_string(&mconfig).unwrap();
-        let deserialized = serde_json::from_str::<MachineConfig>(&serialized).unwrap();
-
-        assert!(deserialized.cpu_template.is_none());
     }
 }

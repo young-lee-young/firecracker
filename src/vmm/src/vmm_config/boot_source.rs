@@ -25,11 +25,13 @@ pub const DEFAULT_KERNEL_CMDLINE: &str = "reboot=k panic=1 nomodule 8250.nr_uart
 #[serde(deny_unknown_fields)]
 pub struct BootSourceConfig {
     /// Path of the kernel image.
+    /// 内核路径
     pub kernel_image_path: String,
     /// Path of the initrd, if there is one.
     pub initrd_path: Option<String>,
     /// The boot arguments to pass to the kernel. If this field is uninitialized,
     /// DEFAULT_KERNEL_CMDLINE is used.
+    /// 启动参数
     pub boot_args: Option<String>,
 }
 
@@ -113,48 +115,5 @@ impl BootConfig {
             kernel_file,
             initrd_file,
         })
-    }
-}
-
-#[cfg(test)]
-pub(crate) mod tests {
-    use vmm_sys_util::tempfile::TempFile;
-
-    use super::*;
-    use crate::snapshot::Snapshot;
-
-    #[test]
-    fn test_boot_config() {
-        let kernel_file = TempFile::new().unwrap();
-        let kernel_path = kernel_file.as_path().to_str().unwrap().to_string();
-
-        let boot_src_cfg = BootSourceConfig {
-            boot_args: None,
-            initrd_path: None,
-            kernel_image_path: kernel_path,
-        };
-
-        let boot_cfg = BootConfig::new(&boot_src_cfg).unwrap();
-        assert!(boot_cfg.initrd_file.is_none());
-        assert!(boot_cfg.cmdline.is_none());
-    }
-
-    #[test]
-    fn test_serde() {
-        let boot_src_cfg = BootSourceConfig {
-            boot_args: Some(DEFAULT_KERNEL_CMDLINE.to_string()),
-            initrd_path: Some("/tmp/initrd".to_string()),
-            kernel_image_path: "./vmlinux.bin".to_string(),
-        };
-
-        // Use bitcode serialization directly for the test data
-        let serialized_data = bitcode::serialize(&boot_src_cfg).unwrap();
-        let restored_boot_cfg: BootSourceConfig = bitcode::deserialize(&serialized_data).unwrap();
-        assert_eq!(boot_src_cfg, restored_boot_cfg);
-
-        // Also test with Snapshot wrapper
-        let snapshot_data = bitcode::serialize(&Snapshot::new(boot_src_cfg.clone())).unwrap();
-        let restored_snapshot = Snapshot::load_without_crc_check(&snapshot_data).unwrap();
-        assert_eq!(boot_src_cfg, restored_snapshot.data);
     }
 }

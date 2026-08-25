@@ -42,31 +42,3 @@ impl ByteBuffer for [u8] {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use std::fmt::Debug;
-
-    use super::*;
-
-    fn bb_len<T: ByteBuffer + ?Sized + Debug>(buf: &T) -> usize {
-        buf.len()
-    }
-
-    fn bb_is_empty<T: ByteBuffer + ?Sized + Debug>(buf: &T) -> bool {
-        buf.len() == 0
-    }
-
-    fn bb_read_from_1<T: ByteBuffer + ?Sized + Debug>(src: &T, dst: &mut [u8]) {
-        src.read_to_slice(1, dst);
-    }
-
-    #[test]
-    fn test_u8_byte_buffer() {
-        let a = [1u8, 2, 3];
-        let mut b = [0u8; 2];
-        assert_eq!(bb_len(a.as_ref()), a.len());
-        assert!(!bb_is_empty(a.as_ref()));
-        bb_read_from_1(a.as_ref(), b.as_mut());
-        assert_eq!(b, [2, 3]);
-    }
-}

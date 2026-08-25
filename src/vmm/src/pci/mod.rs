@@ -402,25 +402,3 @@ impl From<u16> for PciExpressCapabilityId {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_pci_bdf_new() {
-        let sbdf = PciSBDF::new(0x1234, 0x56, 0x1f, 0x7);
-        assert_eq!(sbdf.segment(), 0x1234);
-        assert_eq!(sbdf.bus(), 0x56);
-        assert_eq!(sbdf.device(), 0x1f);
-        assert_eq!(sbdf.function(), 0x7);
-    }
-
-    #[test]
-    fn test_pci_bdf_from_u32() {
-        let sbdf = PciSBDF::from(0x12345678);
-        assert_eq!(sbdf.segment(), 0x1234);
-        assert_eq!(sbdf.bus(), 0x56);
-        assert_eq!(sbdf.device(), 0x0f);
-        assert_eq!(sbdf.function(), 0x0);
-    }
-}

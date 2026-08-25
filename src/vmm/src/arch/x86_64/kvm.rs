@@ -50,8 +50,13 @@ impl Kvm {
         fd: KvmFd,
         kvm_cap_modifiers: Vec<KvmCapability>,
     ) -> Result<Self, KvmArchError> {
+        // 请求使用 xstate 中的功能
+        // 这些功能默认不使用，所以需要手动去请求
+        // TODO Lee P2 搞清楚这里在干嘛
         request_dynamic_xstate_features().map_err(KvmArchError::XstateFeatures)?;
 
+        // 向 KVM 查询 CPU 支持的特性
+        // CPUID：CPU Identification
         let supported_cpuid = fd
             .get_supported_cpuid(KVM_MAX_CPUID_ENTRIES)
             .map_err(KvmArchError::GetSupportedCpuId)?;

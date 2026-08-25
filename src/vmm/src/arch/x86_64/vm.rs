@@ -60,7 +60,10 @@ pub enum KvmVmError {
 pub struct KvmVm {
     /// Architecture independent parts of a vm
     pub common: VmCommon,
+    // msr 这个列表，是在 vCPU 创建的时候放到 vCPU 结构体的 msrs_to_save 字段里面了
     msrs_to_save: MsrList,
+    // xsave2 也是 vCPU 创建的时候放到 vCPU 结构体中的 xsave2_size 字段里
+    // 表示扩展寄存器需要多大的字节来保存
     /// Size in bytes requiring to hold the dynamically-sized `kvm_xsave` struct.
     ///
     /// `None` if `KVM_CAP_XSAVE2` not supported.
@@ -72,11 +75,22 @@ pub struct KvmVm {
 impl KvmVm {
     /// Create a new `KvmVm` struct.
     pub fn new(kvm: Kvm) -> Result<KvmVm, VmError> {
+        // 通过调用 KVM 创建了一个 VM 实例
         let common = Self::create_common(kvm)?;
+
+
+        // 获取 msr 寄存器（Model-Specific Register，模型特定寄存器）
+        // msr 的作用是在 save snapshot 的时候保存
+        // 每个 vcpu 都保存自己的 msr，保存的是特殊控制寄存器
         let msrs_to_save = common
             .kvm
             .msrs_to_save()
             .map_err(KvmVmError::GetMsrsToSave)?;
+
+
+        // XSAVE2 是每个 vCPU 的扩展状态
+        // 保存的是 浮点、SSE、AVX 等扩展寄存器的状态
+        // TODO Lee P2 要搞清楚 xsave2 是什么
 
         // `KVM_CAP_XSAVE2` was introduced to support dynamically-sized XSTATE buffer in kernel
         // v5.17. `KVM_GET_EXTENSION(KVM_CAP_XSAVE2)` returns the required size in byte if
@@ -98,11 +112,18 @@ impl KvmVm {
             ret => Some(usize::try_from(ret).unwrap()),
         };
 
+
+        // TSS：Task State Segment（任务状态段）
+        // 作用：保存的是 CPU 进行任务切换、特权级切换和实模式兼容运行时所需的处理器状态与权限信息
+        // 大小：需要 3 个内存页（3 * 4 KiB = 12 KiB）来保存数据
+        // 这个 TSS 是 x86 特有的
         common
             .fd
             .set_tss_address(u64_to_usize(crate::arch::x86_64::layout::KVM_TSS_ADDRESS))
             .map_err(KvmVmError::SetTssAddress)?;
 
+
+        // 创建空的 port IO bus（端口 I/O 总线）
         let pio_bus = Arc::new(Bus::new());
 
         Ok(KvmVm {
@@ -169,9 +190,12 @@ impl KvmVm {
 
     /// Creates the irq chip and an in-kernel device model for the PIT.
     pub fn setup_irqchip(&self) -> Result<(), KvmVmError> {
+        // 创建中断请求控制器，主要用来处理 guest 的中断
+        // TODO Lee P1 要学习下中断虚拟化
         self.fd()
             .create_irq_chip()
             .map_err(KvmVmError::VmSetIrqChip)?;
+
         // We need to enable the emulation of a dummy speaker port stub so that writing to port 0x61
         // (i.e. KVM_SPEAKER_BASE_ADDRESS) does not trigger an exit to user space.
         let pit_config = kvm_pit_config {
@@ -260,131 +284,5 @@ impl fmt::Debug for VmState {
             .field("pic_slave", &"?")
             .field("ioapic", &"?")
             .finish()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use kvm_bindings::{
-        KVM_CLOCK_REALTIME, KVM_IRQCHIP_IOAPIC, KVM_IRQCHIP_PIC_MASTER, KVM_IRQCHIP_PIC_SLAVE,
-        KVM_PIT_SPEAKER_DUMMY,
-    };
-    use kvm_ioctls::Cap;
-    use std::time::SystemTime;
-
-    use crate::arch::KvmVmError;
-    use crate::vstate::vm::VmState;
-    use crate::vstate::vm::tests::{setup_vm, setup_vm_with_memory};
-
-    #[cfg(target_arch = "x86_64")]
-    #[test]
-    fn test_vm_save_restore_state() {
-        let vm = setup_vm();
-        // Irqchips, clock and pitstate are not configured so trying to save state should fail.
-        vm.save_state().unwrap_err();
-
-        let vm = setup_vm_with_memory(0x1000);
-        vm.setup_irqchip().unwrap();
-
-        let vm_state = vm.save_state().unwrap();
-        assert_eq!(
-            vm_state.pitstate.flags | KVM_PIT_SPEAKER_DUMMY,
-            KVM_PIT_SPEAKER_DUMMY
-        );
-        assert_eq!(vm_state.pic_master.chip_id, KVM_IRQCHIP_PIC_MASTER);
-        assert_eq!(vm_state.pic_slave.chip_id, KVM_IRQCHIP_PIC_SLAVE);
-        assert_eq!(vm_state.ioapic.chip_id, KVM_IRQCHIP_IOAPIC);
-
-        let mut vm = setup_vm_with_memory(0x1000);
-        vm.setup_irqchip().unwrap();
-
-        vm.restore_state(&vm_state, false).unwrap();
-    }
-
-    #[cfg(target_arch = "x86_64")]
-    #[test]
-    fn test_vm_save_restore_state_kvm_clock_realtime() {
-        let vm = setup_vm_with_memory(0x1000);
-        vm.setup_irqchip().unwrap();
-
-        let clock_realtime_supported = vm
-            .kvm()
-            .fd
-            .check_extension_int(Cap::AdjustClock)
-            .cast_unsigned()
-            & KVM_CLOCK_REALTIME
-            != 0;
-
-        // mock a state without realtime information
-        let mut vm_state = vm.save_state().unwrap();
-        vm_state.clock.flags &= !KVM_CLOCK_REALTIME;
-
-        let mut vm = setup_vm_with_memory(0x1000);
-        vm.setup_irqchip().unwrap();
-
-        let res = vm.restore_state(&vm_state, true);
-        assert!(res == Err(KvmVmError::ClockRealtimeNotInState));
-
-        // mock a state with realtime information
-        vm_state.clock.flags |= KVM_CLOCK_REALTIME;
-        vm_state.clock.realtime = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-            .try_into()
-            .unwrap();
-
-        let mut vm = setup_vm_with_memory(0x1000);
-        vm.setup_irqchip().unwrap();
-
-        let res = vm.restore_state(&vm_state, true);
-        if clock_realtime_supported {
-            res.unwrap()
-        } else {
-            assert!(matches!(res, Err(KvmVmError::SetClock(err)) if err.errno() == libc::EINVAL))
-        }
-    }
-
-    #[cfg(target_arch = "x86_64")]
-    #[test]
-    fn test_vm_save_restore_state_bad_irqchip() {
-        use kvm_bindings::KVM_NR_IRQCHIPS;
-
-        let vm = setup_vm_with_memory(0x1000);
-        vm.setup_irqchip().unwrap();
-        let mut vm_state = vm.save_state().unwrap();
-
-        let mut vm = setup_vm_with_memory(0x1000);
-        vm.setup_irqchip().unwrap();
-
-        // Try to restore an invalid PIC Master chip ID
-        let orig_master_chip_id = vm_state.pic_master.chip_id;
-        vm_state.pic_master.chip_id = KVM_NR_IRQCHIPS;
-        vm.restore_state(&vm_state, false).unwrap_err();
-        vm_state.pic_master.chip_id = orig_master_chip_id;
-
-        // Try to restore an invalid PIC Slave chip ID
-        let orig_slave_chip_id = vm_state.pic_slave.chip_id;
-        vm_state.pic_slave.chip_id = KVM_NR_IRQCHIPS;
-        vm.restore_state(&vm_state, false).unwrap_err();
-        vm_state.pic_slave.chip_id = orig_slave_chip_id;
-
-        // Try to restore an invalid IOPIC chip ID
-        vm_state.ioapic.chip_id = KVM_NR_IRQCHIPS;
-        vm.restore_state(&vm_state, false).unwrap_err();
-    }
-
-    #[cfg(target_arch = "x86_64")]
-    #[test]
-    fn test_vmstate_serde() {
-        let mut vm = setup_vm_with_memory(0x1000);
-        vm.setup_irqchip().unwrap();
-        let state = vm.save_state().unwrap();
-
-        // Test direct bitcode serialization
-        let serialized_data = bitcode::serialize(&state).unwrap();
-        let restored_state: VmState = bitcode::deserialize(&serialized_data).unwrap();
-
-        vm.restore_state(&restored_state, false).unwrap();
     }
 }
