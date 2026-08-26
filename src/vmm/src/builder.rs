@@ -270,6 +270,7 @@ pub fn build_microvm_for_boot(
     // TODO Lee P0 需要学习 virtio 相关的东西
 
 
+    // TODO Lee P0 这个 new 方法还是要好好看看的
     let mut device_manager = DeviceManager::new(
         event_manager,
         kvm_vm.vcpus_exit_evt(),

@@ -100,10 +100,13 @@ pub struct Vcpu {
     /// Debugger emitter for gdb events
     #[cfg(feature = "gdb")]
     gdb_event: Option<Sender<usize>>,
+
+
+    // 这几个是为了在 vmm 线程和 vCPU 线程之间通信的
     /// The receiving end of events channel owned by the vcpu side.
     event_receiver: Receiver<VcpuEvent>,
     /// The transmitting end of the events channel which will be given to the handler.
-    event_sender: Option<Sender<VcpuEvent>>,
+    event_sender: Option<Sender<VcpuEvent>>, //
     /// The receiving end of the responses channel which will be given to the handler.
     response_receiver: Option<Receiver<VcpuResponse>>,
     /// The transmitting end of the responses channel owned by the vcpu side.
@@ -114,11 +117,17 @@ impl Vcpu {
     /// Registers a signal handler which kicks the vcpu running on the current thread, if there is
     /// one.
     fn register_kick_signal_handler(&mut self) {
-        extern "C" fn handle_signal(_: c_int, _: *mut siginfo_t, _: *mut c_void) {
+        extern "C" fn handle_signal(
+            _: c_int,
+            _: *mut siginfo_t,
+            _: *mut c_void
+        ) {
             // We write to the immediate_exit from other thread, so make sure the read in the
             // KVM_RUN sees the up to date value
             fence(Ordering::Acquire);
         }
+
+
         register_signal_handler(sigrtmin() + VCPU_RTSIG_OFFSET, handle_signal)
             .expect("Failed to register vcpu signal handler");
     }
@@ -181,24 +190,39 @@ impl Vcpu {
     ) -> Result<VcpuHandle, StartThreadedError> {
         let event_sender = self.event_sender.take().expect("vCPU already started");
         let response_receiver = self.response_receiver.take().unwrap();
+
+
+        // 这里把 vCPU 的文件描述符复制了一份，给到 vm 结构体
         let vcpu_fd = self
             .copy_kvm_vcpu_fd(vm)
             .map_err(StartThreadedError::CopyFd)?;
+
+
+        // 起一个 vCPU 线程
         let vcpu_thread = thread::Builder::new()
+            // 这个 name 使用 ps -T 可以看到名为 fc_vcpu 的线程
             .name(format!("fc_vcpu {}", self.kvm_vcpu.index))
+            // spawn 这里面涉及到并发
             .spawn(move || {
                 let filter = &*seccomp_filter;
                 self.register_kick_signal_handler();
+
+
+
                 // Synchronization to make sure thread local data is initialized.
+                // 这里就类似 Go 中的 wg.Done()
                 barrier.wait();
+
+
                 self.run(filter);
             })
             .map_err(StartThreadedError::Spawn)?;
 
+
         Ok(VcpuHandle::new(
             event_sender,
             response_receiver,
-            vcpu_fd,
+            vcpu_fd, // 这个复制后的 vCPU 文件描述符给到 vm 结构体
             vcpu_thread,
         ))
     }

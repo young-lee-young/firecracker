@@ -214,6 +214,8 @@ impl KvmVm {
                 .map_err(VmError::EventFd)?;
 
             // 真正创建 vCPU
+            // 这里 cpu_idx 是重点，这会使得 guest 中的 vcpu 和 firecracker 中的 vcpu 结构体对应上
+            // 以后哪个 vcpu 执行了操作，会在 firecracker 中对应的 vcpu 中处理
             let vcpu = Vcpu::new(cpu_idx, self, exit_evt).map_err(VmError::CreateVcpu)?;
             vcpus.push(vcpu);
         }
@@ -254,31 +256,56 @@ impl KvmVm {
         vcpu_seccomp_filter: Arc<crate::seccomp::BpfProgram>,
     ) -> Result<(), StartVcpusError> {
         let vcpu_count = vcpus.len();
+        // vcpu_count + 当前线程
+        // 因为下面 start_threaded 方法中涉及到并发，所以需要这个，就类似 Go 中的 sync.WaitGroup 类似
         let barrier = Arc::new(Barrier::new(vcpu_count + 1));
 
+
+        // 处理标准输出
         let stdin = std::io::stdin().lock();
+        // raw mode
         stdin.set_raw_mode().inspect_err(|&err| {
             crate::logger::warn!("Cannot set raw mode for the terminal. {:?}", err);
         })?;
+        // 非阻塞模式
         stdin.set_non_block(true).inspect_err(|&err| {
             crate::logger::warn!("Cannot set non block for the terminal. {:?}", err);
         })?;
 
+
+        // 到这里时 vcpus_handles 还是空的，只是初始化了一下
         let mut handles = self.vcpus_handles();
+        // 扩大容量 vcpu_count 这么大
         handles.reserve(vcpu_count);
+
+
+        // drain 表示从 vcpus 取出元素，并且从 vcpus 中移除
         for mut vcpu in vcpus.drain(..) {
+
+
+            // 这里所有的 vCPU 都会使用同一个 mmio_bus 和 pio_bus
+            // 哪个 vCPU 触发了读写操作，都会由 firecracker 中对应的 vCPU 来处理
             vcpu.set_mmio_bus(self.common.mmio_bus.clone());
             #[cfg(target_arch = "x86_64")]
             vcpu.kvm_vcpu.set_pio_bus(self.pio_bus.clone());
 
+
+            // start_threaded 返回了一个 vcpu handle，放到 handles 里面
             handles.push(vcpu.start_threaded(
                 self,
                 vcpu_seccomp_filter.clone(),
                 barrier.clone(),
             )?);
         }
+
+
+        // 好像是释放 vcpus_handles 里面的锁 
         drop(handles);
+
+
+        // 这里会等待所有的 vcpu_count 个线程执行完
         barrier.wait();
+
 
         Ok(())
     }
