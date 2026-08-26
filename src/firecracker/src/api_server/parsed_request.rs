@@ -125,6 +125,7 @@ impl TryFrom<&Request> for ParsedRequest {
                 parse_patch_net(body, path_tokens.next())
             }
             (Method::Patch, "pmem", Some(body)) => parse_patch_pmem(body, path_tokens.next()),
+            // Pause 和 Resume 接口
             (Method::Patch, "vm", Some(body)) => parse_patch_vm_state(body),
             (Method::Patch, "hotplug", Some(body)) if path_tokens.next() == Some("memory") => {
                 parse_patch_memory_hotplug(body)

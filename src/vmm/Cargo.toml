@@ -68,17 +68,5 @@ device_tree = "1.1.0"
 itertools = "0.14.0"
 proptest = { version = "1.11.0", default-features = false, features = ["std"] }
 
-[[bench]]
-name = "cpu_templates"
-harness = false
-
-[[bench]]
-name = "queue"
-harness = false
-
-[[bench]]
-name = "block_request"
-harness = false
-
 [lints]
 workspace = true

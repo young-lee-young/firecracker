@@ -207,6 +207,9 @@ impl KvmVcpu {
     ) -> Result<(), KvmVcpuConfigureError> {
         let mut cpuid = vcpu_config.cpu_config.cpuid.clone();
 
+        // 这里是根据是否启用超线程，修改 guest 中看到的 CPU 视图
+        // 这里其实还没有调用底层，只是修改了一下 cpuid 的数据结构
+        // TODO Lee P2 这里的逻辑以后要详细看一下
         // Apply machine specific changes to CPUID.
         cpuid.normalize(
             // The index of the current logical CPU in the range [0..cpu_count].
@@ -217,17 +220,26 @@ impl KvmVcpu {
             u8::from(vcpu_config.vcpu_count > 1 && vcpu_config.smt),
         )?;
 
+
         // Set CPUID.
+        // 把 firecracker 中的 CPUID 转成库的 CPUID
         let kvm_cpuid = kvm_bindings::CpuId::try_from(cpuid)?;
 
+
         // Set CPUID in the KVM
+        // 真正调用 KVM 设置 CPUID 信息
+        // 参考 https://docs.kernel.org/virt/kvm/api.html#kvm-set-cpuid
         self.fd
             .set_cpuid2(&kvm_cpuid)
             .map_err(KvmVcpuConfigureError::SetCpuid)?;
 
+
         // Clone MSR entries that are modified by CPU template from `VcpuConfig`.
+        // 这里 vcpu_config.cpu_config.msrs 是 cpu template 中关注的 msr
         let mut msrs = vcpu_config.cpu_config.msrs.clone();
+        // msrs_to_save 是最开始调用 KVM 查询到的 msr（也就是 vm 中查询的保存 snapshot 需要保存的 msr）
         self.msrs_to_save.extend(msrs.keys());
+
 
         // Apply MSR modification to comply the linux boot protocol.
         create_boot_msr_entries().into_iter().for_each(|entry| {

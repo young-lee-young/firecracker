@@ -40,20 +40,29 @@ pub struct CpuConfiguration {
     /// Register values as a key pair for model specific registers
     /// Key: MSR address
     /// Value: MSR value
+    /// 这个结果是一个 map，键是 msr 的地址，值是 msr 的值
     pub msrs: BTreeMap<u32, u64>,
 }
 
 impl CpuConfiguration {
     /// Create new CpuConfiguration.
     pub fn new(
+        // 在宿主机上查询到 CPUID 的集合
         supported_cpuid: CpuId,
+        // 用户配置的 cpu template
         cpu_template: &CustomCpuTemplate,
         first_vcpu: &Vcpu,
     ) -> Result<Self, CpuConfigurationError> {
+        // 把库里面的 CPUID 转换为 firecracker 自己的 CPUID 结构
         let cpuid = cpuid::Cpuid::try_from(supported_cpuid)?;
+
+
+        // 查询 msr 的当前值，这里只查询 cpu template 中的值
         let msrs = first_vcpu
             .kvm_vcpu
             .get_msrs(cpu_template.msr_index_iter())?;
+
+
         Ok(CpuConfiguration { cpuid, msrs })
     }
 
@@ -70,6 +79,7 @@ impl CpuConfiguration {
         let guest_cpuid = cpuid.inner_mut();
 
         // Apply CPUID modifiers
+        // 把 cpu template 中对 CPUID 的修改，应用上
         for mod_leaf in template.cpuid_modifiers.iter() {
             let cpuid_key = CpuidKey {
                 leaf: mod_leaf.leaf,
@@ -103,6 +113,7 @@ impl CpuConfiguration {
             }
         }
 
+        // 把 cpu template 中对 msr 的修改，应用上
         for modifier in &template.msr_modifiers {
             if let Some(reg_value) = msrs.get_mut(&modifier.addr) {
                 *reg_value = modifier.bitmap.apply(*reg_value);

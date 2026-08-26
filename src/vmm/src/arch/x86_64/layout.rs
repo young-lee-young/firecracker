@@ -59,6 +59,7 @@ pub const ZERO_PAGE_START: u64 = 0x7000;
 pub const APIC_ADDR: u32 = 0xfee0_0000;
 
 /// IOAPIC address
+/// 4 GiB - 20 MiB
 pub const IOAPIC_ADDR: u32 = 0xfec0_0000;
 
 /// Location of RSDP pointer in x86 machines
@@ -106,8 +107,10 @@ pub const MMIO32_MEM_START: u64 = FIRST_ADDR_PAST_32BITS - MMIO32_MEM_SIZE;
 // We dedicate the last 256 MiB of the 32-bit MMIO address space PCIe for memory-mapped access to
 // configuration.
 /// Size of MMIO region for PCIe configuration accesses.
+/// 256 MiB
 pub const PCI_MMCONFIG_SIZE: u64 = 256 << 20;
 /// Start of MMIO region for PCIe configuration accesses.
+/// (4 GiB - 20 MiB) - 256 MiB
 pub const PCI_MMCONFIG_START: u64 = IOAPIC_ADDR as u64 - PCI_MMCONFIG_SIZE;
 /// MMIO space per PCIe segment
 pub const PCI_MMIO_CONFIG_SIZE_PER_SEGMENT: u64 = 4096 * 256;
@@ -119,8 +122,10 @@ pub const PCI_MMIO_CONFIG_SIZE_PER_SEGMENT: u64 = 4096 * 256;
 pub const BOOT_DEVICE_MEM_START: u64 = MMIO32_MEM_START;
 
 /// Beginning of memory region for device MMIO 32-bit accesses
+/// 3 GiB + 4 KiB 的位置
 pub const MEM_32BIT_DEVICES_START: u64 = BOOT_DEVICE_MEM_START + MMIO_LEN;
 /// Size of memory region for device MMIO 32-bit accesses
+/// (3 GiB + 4 KiB) 到 (4 GiB - 20 MiB - 256 MiB) 这段长度
 pub const MEM_32BIT_DEVICES_SIZE: u64 = PCI_MMCONFIG_START - MEM_32BIT_DEVICES_START;
 
 

@@ -77,8 +77,6 @@ enum MainError {
     ResizeFdtable(ResizeFdTableError),
     /// RunWithApiError error: {0}
     RunWithApi(ApiServerError),
-    /// RunWithoutApiError error: {0}
-    RunWithoutApiError(RunWithoutApiError),
 }
 
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
@@ -97,7 +95,6 @@ impl From<MainError> for FcExitCode {
             MainError::ParseArguments(_) => FcExitCode::ArgParsing,
             MainError::InvalidLogLevel(_) => FcExitCode::BadConfiguration,
             MainError::RunWithApi(ApiServerError::MicroVMStoppedWithError(code)) => code,
-            MainError::RunWithoutApiError(RunWithoutApiError::Shutdown(code)) => code,
             _ => FcExitCode::GenericError,
         }
     }
@@ -341,10 +338,10 @@ fn main_exec() -> Result<(), MainError> {
     // 注册信号处理的方法
     register_signal_handlers().map_err(MainError::RegisterSignalHandlers)?;
 
-    // TODO Lee P2 resize_fdtable 方法是在做什么
     #[cfg(target_arch = "aarch64")]
     enable_ssbd_mitigation();
 
+    // TODO Lee P2 resize_fdtable 方法是在做什么
     if let Err(err) = resize_fdtable() {
         match err {
             // These errors are non-critical: In the worst case we have worse snapshot restore
@@ -396,7 +393,7 @@ fn main_exec() -> Result<(), MainError> {
 
     let boot_timer_enabled = arguments.flag_present("boot-timer");
     let pci_enabled = arguments.flag_present("enable-pci");
-    let api_enabled = !arguments.flag_present("no-api");
+    
     let api_payload_limit = arg_parser
         .arguments()
         .single_value("http-api-max-payload-size")
@@ -418,59 +415,41 @@ fn main_exec() -> Result<(), MainError> {
         })
         .unwrap_or_else(|| api_payload_limit);
 
-    if api_enabled {
-        let bind_path = arguments
-            .single_value("api-sock")
-            .map(PathBuf::from)
-            .expect("Missing argument: api-sock");
+    let bind_path = arguments
+        .single_value("api-sock")
+        .map(PathBuf::from)
+        .expect("Missing argument: api-sock");
 
-        let start_time_us = arguments.single_value("start-time-us").map(|s| {
-            s.parse::<u64>()
-                .expect("'start-time-us' parameter expected to be of 'u64' type.")
-        });
+    let start_time_us = arguments.single_value("start-time-us").map(|s| {
+        s.parse::<u64>()
+            .expect("'start-time-us' parameter expected to be of 'u64' type.")
+    });
 
-        let start_time_cpu_us = arguments.single_value("start-time-cpu-us").map(|s| {
-            s.parse::<u64>()
-                .expect("'start-time-cpu-us' parameter expected to be of 'u64' type.")
-        });
+    let start_time_cpu_us = arguments.single_value("start-time-cpu-us").map(|s| {
+        s.parse::<u64>()
+            .expect("'start-time-cpu-us' parameter expected to be of 'u64' type.")
+    });
 
-        let parent_cpu_time_us = arguments.single_value("parent-cpu-time-us").map(|s| {
-            s.parse::<u64>()
-                .expect("'parent-cpu-time-us' parameter expected to be of 'u64' type.")
-        });
+    let parent_cpu_time_us = arguments.single_value("parent-cpu-time-us").map(|s| {
+        s.parse::<u64>()
+            .expect("'parent-cpu-time-us' parameter expected to be of 'u64' type.")
+    });
 
-        let process_time_reporter =
-            ProcessTimeReporter::new(start_time_us, start_time_cpu_us, parent_cpu_time_us);
+    let process_time_reporter =
+        ProcessTimeReporter::new(start_time_us, start_time_cpu_us, parent_cpu_time_us);
 
-        api_server_adapter::run_with_api(
-            &mut seccomp_filters,
-            vmm_config_json,
-            bind_path,
-            instance_info,
-            process_time_reporter,
-            boot_timer_enabled,
-            pci_enabled,
-            api_payload_limit,
-            mmds_size_limit,
-            metadata_json.as_deref(),
-        )
-        .map_err(MainError::RunWithApi)
-    } else {
-        let seccomp_filters: BpfThreadMap = seccomp_filters
-            .into_iter()
-            .filter(|(k, _)| k != "api")
-            .collect();
-        run_without_api(
-            &seccomp_filters,
-            vmm_config_json,
-            instance_info,
-            boot_timer_enabled,
-            pci_enabled,
-            mmds_size_limit,
-            metadata_json.as_deref(),
-        )
-        .map_err(MainError::RunWithoutApiError)
-    }
+    api_server_adapter::run_with_api(
+        &mut seccomp_filters,
+        bind_path,
+        instance_info,
+        process_time_reporter,
+        boot_timer_enabled,
+        pci_enabled,
+        api_payload_limit,
+        mmds_size_limit,
+        metadata_json.as_deref(),
+    )
+    .map_err(MainError::RunWithApi)
 }
 
 /// Attempts to resize the processes file descriptor table to match RLIMIT_NOFILE or 2048 if no
@@ -571,103 +550,5 @@ fn print_snapshot_data_format(snapshot_path: &str) -> Result<(), SnapshotVersion
         get_format_version(&mut snapshot_reader).map_err(SnapshotVersionError::SnapshotVersion)?;
 
     println!("v{}", data_format_version);
-    Ok(())
-}
-
-#[derive(Debug, thiserror::Error, displaydoc::Display)]
-pub enum BuildFromJsonError {
-    /// Configuration for VMM from one single json failed: {0}
-    ParseFromJson(vmm::resources::ResourcesError),
-    /// Could not Start MicroVM from one single json: {0}
-    StartMicroVM(StartMicrovmError),
-}
-
-// Configure and start a microVM as described by the command-line JSON.
-#[allow(clippy::too_many_arguments)]
-fn build_microvm_from_json(
-    seccomp_filters: &BpfThreadMap,
-    event_manager: &mut EventManager,
-    config_json: String,
-    instance_info: InstanceInfo,
-    boot_timer_enabled: bool,
-    pci_enabled: bool,
-    mmds_size_limit: usize,
-    metadata_json: Option<&str>,
-) -> Result<Arc<Mutex<vmm::Vmm>>, BuildFromJsonError> {
-    let mut vm_resources =
-        VmResources::from_json(&config_json, &instance_info, mmds_size_limit, metadata_json)
-            .map_err(BuildFromJsonError::ParseFromJson)?;
-    vm_resources.boot_timer = boot_timer_enabled;
-    vm_resources.pci_enabled = pci_enabled;
-    let vmm = vmm::builder::build_and_boot_microvm(
-        &instance_info,
-        &vm_resources,
-        event_manager,
-        seccomp_filters,
-    )
-    .map_err(BuildFromJsonError::StartMicroVM)?;
-
-    info_unrestricted!("Successfully started microvm that was configured from one single json");
-
-    Ok(vmm)
-}
-
-#[derive(Debug, thiserror::Error, displaydoc::Display)]
-enum RunWithoutApiError {
-    /// MicroVMStopped without an error: {0:?}
-    Shutdown(FcExitCode),
-    /// Failed to build MicroVM from Json: {0}
-    BuildMicroVMFromJson(BuildFromJsonError),
-    /// Missing vmm seccomp filter
-    MissingSeccompFilter,
-    /// Failed to install vmm seccomp filter: {0}
-    SeccompFilter(vmm::seccomp::InstallationError),
-}
-
-fn run_without_api(
-    seccomp_filters: &BpfThreadMap,
-    config_json: Option<String>,
-    instance_info: InstanceInfo,
-    bool_timer_enabled: bool,
-    pci_enabled: bool,
-    mmds_size_limit: usize,
-    metadata_json: Option<&str>,
-) -> Result<(), RunWithoutApiError> {
-    let mut event_manager = EventManager::new().expect("Unable to create EventManager");
-
-    // Build the microVm. We can ignore VmResources since it's not used without api.
-    let vmm = build_microvm_from_json(
-        seccomp_filters,
-        &mut event_manager,
-        // Safe to unwrap since '--no-api' requires this to be set.
-        config_json.unwrap(),
-        instance_info,
-        bool_timer_enabled,
-        pci_enabled,
-        mmds_size_limit,
-        metadata_json,
-    )
-    .map_err(RunWithoutApiError::BuildMicroVMFromJson)?;
-
-    // INVARIANT: seccomp must be applied before entering the event loop.
-    vmm::seccomp::apply_filter(
-        seccomp_filters
-            .get("vmm")
-            .ok_or(RunWithoutApiError::MissingSeccompFilter)?,
-    )
-    .map_err(RunWithoutApiError::SeccompFilter)?;
-
-    // Run the EventManager that drives everything in the microVM.
-    loop {
-        event_manager
-            .run()
-            .expect("Failed to start the event manager");
-
-        match vmm.lock().unwrap().shutdown_exit_code() {
-            Some(FcExitCode::Ok) => break,
-            Some(exit_code) => return Err(RunWithoutApiError::Shutdown(exit_code)),
-            None => continue,
-        }
-    }
     Ok(())
 }

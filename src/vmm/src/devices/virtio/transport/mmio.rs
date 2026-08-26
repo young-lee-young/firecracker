@@ -392,7 +392,7 @@ impl From<VirtioInterruptType> for IrqType {
 #[derive(Debug)]
 pub struct IrqTrigger {
     pub(crate) irq_status: Arc<AtomicU32>,
-    pub(crate) irq_evt: EventFd,
+    pub(crate) irq_evt: EventFd, // 用来通知 KVM
 }
 
 impl Default for IrqTrigger {

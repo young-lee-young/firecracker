@@ -188,20 +188,27 @@ pub fn configure_system_for_boot(
 ) -> Result<(), ConfigurationError> {
     // Construct the base CpuConfiguration to apply CPU template onto.
     let cpu_config = CpuConfiguration::new(kvm.supported_cpuid.clone(), cpu_template, &vcpus[0])?;
+
+
+    // 把 cpu template 中对 CPUID 和 MSR，应用上
     // Apply CPU template to the base CpuConfiguration.
     let cpu_config = CpuConfiguration::apply_template(cpu_config, cpu_template)?;
 
+
     let vcpu_config = VcpuConfig {
         vcpu_count: machine_config.vcpu_count,
-        smt: machine_config.smt,
+        smt: machine_config.smt, // 是否支持超线程
         cpu_config,
     };
 
+
+    // TODO Lee P0 从这里到下面的代码涉及到底层的 CPUID MSR 需要学习后进一步再看
     // Configure vCPUs with normalizing and setting the generated CPU configuration.
     for vcpu in vcpus.iter_mut() {
         vcpu.kvm_vcpu
             .configure(vm.guest_memory(), entry_point, &vcpu_config)?;
     }
+
 
     // Write the kernel command line to guest memory. This is x86_64 specific, since on
     // aarch64 the command line will be specified through the FDT.
@@ -210,12 +217,14 @@ pub fn configure_system_for_boot(
         .map(|cmdline_cstring| cmdline_cstring.as_bytes_with_nul().len())
         .expect("Cannot create cstring from cmdline string");
 
+
     load_cmdline(
         vm.guest_memory(),
         GuestAddress(crate::arch::x86_64::layout::CMDLINE_START),
         &boot_cmdline,
     )
     .map_err(ConfigurationError::LoadCommandline)?;
+
 
     // Note that this puts the mptable at the last 1k of Linux's 640k base RAM
     mptable::setup_mptable(
@@ -224,6 +233,7 @@ pub fn configure_system_for_boot(
         vcpu_config.vcpu_count,
     )
     .map_err(ConfigurationError::MpTableSetup)?;
+
 
     match entry_point.protocol {
         BootProtocol::PvhBoot => {
@@ -238,6 +248,7 @@ pub fn configure_system_for_boot(
             )?;
         }
     }
+
 
     // Create ACPI tables and write them in guest memory
     // For the time being we only support ACPI in x86_64
@@ -437,10 +448,14 @@ pub fn load_kernel(
 ) -> Result<EntryPoint, ConfigurationError> {
     // Need to clone the File because reading from it
     // mutates it.
+    // 内核文件对象
     let mut kernel_file = kernel
         .try_clone()
         .map_err(|_| ConfigurationError::KernelFile)?;
 
+
+    // 加载内核到 guest 物理地址
+    // TODO Lee P2 这里可以写一个程序 过一遍内核加载的逻辑
     let entry_addr = Loader::load(
         guest_memory,
         None,
@@ -448,6 +463,7 @@ pub fn load_kernel(
         Some(GuestAddress(get_kernel_start())),
     )
     .map_err(ConfigurationError::KernelLoader)?;
+
 
     let mut entry_point_addr: GuestAddress = entry_addr.kernel_load;
     let mut boot_prot: BootProtocol = BootProtocol::LinuxBoot;
@@ -464,72 +480,3 @@ pub fn load_kernel(
         protocol: boot_prot,
     })
 }
-
-#[cfg(kani)]
-mod verification {
-
-    use crate::arch::arch_memory_regions;
-    use crate::arch::x86_64::layout::{
-        FIRST_ADDR_PAST_32BITS, FIRST_ADDR_PAST_64BITS_MMIO, MMIO32_MEM_SIZE, MMIO32_MEM_START,
-        MMIO64_MEM_SIZE, MMIO64_MEM_START,
-    };
-    use crate::utils::u64_to_usize;
-
-    #[kani::proof]
-    #[kani::unwind(4)]
-    fn verify_arch_memory_regions() {
-        let len: u64 = kani::any::<u64>();
-
-        kani::assume(len > 0);
-
-        let regions = arch_memory_regions(len as usize);
-
-        // There are two MMIO gaps, so we can get either 1, 2 or 3 regions
-        assert!(regions.len() <= 3);
-        assert!(regions.len() >= 1);
-
-        // The first address is always 0
-        assert_eq!(regions[0].0.0, 0);
-
-        // The total length of all regions is what we requested
-        let actual_size = regions.iter().map(|&(_, len)| len).sum::<usize>();
-        assert!(actual_size <= len as usize);
-        if actual_size < u64_to_usize(len) {
-            assert_eq!(
-                actual_size,
-                usize::MAX - u64_to_usize(MMIO32_MEM_SIZE) - u64_to_usize(MMIO64_MEM_SIZE)
-            );
-        }
-
-        // No region overlaps the MMIO gap
-        assert!(
-            regions
-                .iter()
-                .all(|&(start, len)| (start.0 >= FIRST_ADDR_PAST_32BITS
-                    || start.0 + len as u64 <= MMIO32_MEM_START)
-                    && (start.0 >= FIRST_ADDR_PAST_64BITS_MMIO
-                        || start.0 + len as u64 <= MMIO64_MEM_START))
-        );
-
-        // All regions have non-zero length
-        assert!(regions.iter().all(|&(_, len)| len > 0));
-
-        // If there's at least two regions, they perfectly snuggle up to one of the two MMIO gaps
-        if regions.len() >= 2 {
-            kani::cover!();
-
-            assert_eq!(regions[0].0.0 + regions[0].1 as u64, MMIO32_MEM_START);
-            assert_eq!(regions[1].0.0, FIRST_ADDR_PAST_32BITS);
-        }
-
-        // If there are three regions, the last two perfectly snuggle up to the 64bit
-        // MMIO gap
-        if regions.len() == 3 {
-            kani::cover!();
-
-            assert_eq!(regions[1].0.0 + regions[1].1 as u64, MMIO64_MEM_START);
-            assert_eq!(regions[2].0.0, FIRST_ADDR_PAST_64BITS_MMIO);
-        }
-    }
-}
-

@@ -191,7 +191,7 @@ impl KvmVm {
     /// Creates the irq chip and an in-kernel device model for the PIT.
     pub fn setup_irqchip(&self) -> Result<(), KvmVmError> {
         // 创建中断请求控制器，主要用来处理 guest 的中断
-        // TODO Lee P1 要学习下中断虚拟化
+        // TODO Lee P0 要学习下中断虚拟化
         self.fd()
             .create_irq_chip()
             .map_err(KvmVmError::VmSetIrqChip)?;

@@ -233,6 +233,43 @@ pub fn build_microvm_for_boot(
     let vm = Vm::Kvm(kvm_vm.clone());
 
 
+    // 拿到内存数据结构
+    let guest_memory = kvm_vm.guest_memory();
+    // TODO Lee P2 这两个读取还需要详细看
+    // 把内核读到内存
+    let entry_point = load_kernel(&boot_config.kernel_file, guest_memory)?;
+    // 把 initrd 读到内存
+    let initrd = InitrdConfig::from_config(boot_config, guest_memory)?;
+
+
+    // 下面都是 IO 虚拟化相关的逻辑了
+    // 在这里学习下 IO 虚拟化相关的知识
+
+
+    // MMIO（Memory-Mapped I/O）工作原理
+    // 我们以 block 举例
+    // 1. firecracker 在 MMIO32 这段地址 (3 GiB - 4 GiB) 分配一段空间作为 blk 的 MMIO 寄存器区域，并且注册到 firecracker 的 mmio_bus
+    // 2. 通过启动时的内核参数告诉 virtio-blk 这段地址
+    // 3. guest 在写入时，把数据写入 guest RAM 区域，把 blk 需要的寄存器信息写入 MMIO 区域（起始没有真正写入，只是触发了一次 CPU 的异常）
+    // 4. CPU 发现 MMIO 这段区域不是 RAM 区域，触发 VM Exit，陷入到 KVM
+    // 5. KVM 给到 firecracker 处理，这里有 2 种处理方法
+    //    1. KVM 通过 ioeventfd（KVM + Linux eventfd） 把事件通知 firecracker，firecracker EventManager 来处理
+    //    2. 直接把 firecracker vCPU 调用的 kvm_run 方法返回，firecracker 收到 VcpuExit::MmioWrite，交给 mmio_bus 处理
+    // 6. firecracker 读取 virtqueue，开始处理读写请求
+    // TODO Lee P1 学习下 Linux eventfd 机制
+
+    // Port IO 工作原理
+    // 1. 在创建 vCPU 时，会配置 VMCS（virtual machine control structure，这是 intel 的配置，AMD 中叫 VMCB，virtual machine control block）
+    // 2. guest 执行 IN/OUT 指令，比如 outb %al, $0x3f8（把 al 机粗气的数据写入 0x3f8 Port，串口）
+    // 3. CPU 在执行时，会检查这个 Port 是否被拦截
+    // 4. 陷入到 KVM 里处理
+    // 5. KVM 给到 firecracker 处理，kvm run 会返回 KVM_EXIT_IO，再交给 pio_bus 处理
+    // TODO Lee P1 看看内核中 KVM 创建 vCPU 时 VMCS/VMCB 是怎么处理的
+
+
+    // TODO Lee P0 需要学习 virtio 相关的东西
+
+
     let mut device_manager = DeviceManager::new(
         event_manager,
         kvm_vm.vcpus_exit_evt(),
@@ -241,15 +278,15 @@ pub fn build_microvm_for_boot(
         vm_resources.serial_rate_limiter(),
     )?;
 
-    let guest_memory = kvm_vm.guest_memory();
-    let entry_point = load_kernel(&boot_config.kernel_file, guest_memory)?;
-    let initrd = InitrdConfig::from_config(boot_config, guest_memory)?;
 
+    // pci_enabled 是通过 api 参数传进来的
+    // 这个参数会决定 attach_virtio_device 中是加入一个 PCI 设备还是一个 MMIO 好的设备
     if vm_resources.pci_enabled {
         device_manager.enable_pci(&kvm_vm)?;
     } else {
         boot_cmdline.insert("pci", "off")?;
     }
+
 
     // The boot timer device needs to be the first device attached in order
     // to maintain the same MMIO address referenced in the documentation
@@ -258,6 +295,8 @@ pub fn build_microvm_for_boot(
         device_manager.attach_boot_timer_device(&kvm_vm, request_ts)?;
     }
 
+
+    // 内存气球
     if let Some(balloon) = vm_resources.balloon.get() {
         attach_balloon_device(
             &mut device_manager,
@@ -268,6 +307,8 @@ pub fn build_microvm_for_boot(
         )?;
     }
 
+
+    // 块设备
     attach_block_devices(
         &mut device_manager,
         &vm,
@@ -275,6 +316,8 @@ pub fn build_microvm_for_boot(
         vm_resources.block.devices.iter(),
         event_manager,
     )?;
+
+
     attach_net_devices(
         &mut device_manager,
         &vm,
@@ -282,6 +325,9 @@ pub fn build_microvm_for_boot(
         vm_resources.net_builder.iter(),
         event_manager,
     )?;
+
+
+    // 内存持久化为文件
     attach_pmem_devices(
         &mut device_manager,
         &vm,
@@ -290,6 +336,8 @@ pub fn build_microvm_for_boot(
         event_manager,
     )?;
 
+
+    // 用于 host 和 guest 之间通信
     if let Some(unix_vsock) = vm_resources.vsock.get() {
         attach_unixsock_vsock_device(
             &mut device_manager,
@@ -300,6 +348,9 @@ pub fn build_microvm_for_boot(
         )?;
     }
 
+
+    // 就是 virtio 下面的 rng 目录，提供随机数种子
+    // rng：Random Number Generator
     if let Some(entropy) = vm_resources.entropy.get() {
         attach_entropy_device(
             &mut device_manager,
@@ -310,7 +361,9 @@ pub fn build_microvm_for_boot(
         )?;
     }
 
+
     // Attach virtio-mem device if configured
+    // 用于内存的热插拔
     if let Some(memory_hotplug) = &vm_resources.memory_hotplug {
         attach_virtio_mem_device(
             &mut device_manager,
@@ -341,6 +394,7 @@ pub fn build_microvm_for_boot(
         warn!("Vcpus do not support pvtime, steal time will not be reported to guest");
     }
 
+    // 配置系统启动所需的东西
     configure_system_for_boot(
         kvm_vm.kvm(),
         &kvm_vm,
@@ -699,8 +753,11 @@ fn attach_block_devices<'a, I: Iterator<Item = &'a Arc<Mutex<Block>>> + Debug>(
     event_manager: &mut EventManager,
 ) -> Result<(), StartMicrovmError> {
     for block in blocks {
+        // 这个 id 是用户传进来的
         let (id, is_vhost_user) = {
             let locked = block.lock().expect("Poisoned lock");
+
+            // 如果是 root 设备，给 cmdline 加上一个 root=xxx 的参数，作为启动盘
             if locked.root_device() {
                 append_root_device_cmdline(
                     cmdline,
@@ -710,6 +767,7 @@ fn attach_block_devices<'a, I: Iterator<Item = &'a Arc<Mutex<Block>>> + Debug>(
             }
             (locked.id().to_string(), locked.is_vhost_user())
         };
+
         // The device mutex mustn't be locked here otherwise it will deadlock.
         device_manager.attach_virtio_device(
             vm,

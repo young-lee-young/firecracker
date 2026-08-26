@@ -307,6 +307,8 @@ impl VirtioBlock {
             avail_features |= 1u64 << VIRTIO_BLK_F_RO;
         };
 
+        // EFD_NONBLOCK 表示是一个非阻塞模式的 eventfd
+        // 非阻塞表示：在读取的时候，如果没有事件，不会卡住等待，而是立即返回 EAGAIN 错误
         let queue_evts = [EventFd::new(libc::EFD_NONBLOCK).map_err(VirtioBlockError::EventFd)?];
 
         let queues = BLOCK_QUEUE_SIZES.iter().map(|&s| Queue::new(s)).collect();

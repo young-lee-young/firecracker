@@ -504,7 +504,7 @@ impl KvmVm {
             .try_into()
             .map_err(|_| VmError::NotEnoughMemorySlots(self.common.max_memslots))?;
 
-        
+
         // 申请 slot_cnt 个 slot
         let slot_from = self
             .next_kvm_slot(slot_cnt)
@@ -516,7 +516,7 @@ impl KvmVm {
             region, slot_from, slot_size,
         ));
 
-        
+
         // 向 KVM 中注册
         self.register_memory_region(arcd_region)
     }
@@ -667,6 +667,7 @@ impl KvmVm {
 
     /// Register a device IRQ
     pub fn register_irq(&self, fd: &EventFd, gsi: u32) -> Result<(), errno::Error> {
+        // 真正向 KVM 给 device 注册一个中断，用于 firecracker 通知 KVM 给 guest 发送中断
         self.common.fd.register_irqfd(fd, gsi)?;
 
         let mut entry = kvm_irq_routing_entry {
@@ -684,6 +685,8 @@ impl KvmVm {
         }
         entry.u.irqchip.pin = gsi;
 
+        // 把中断记录到 vm 的 interrupts 字段中
+        // 中断号是 key
         self.common
             .interrupts
             .lock()

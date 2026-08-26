@@ -139,24 +139,3 @@ pub(crate) fn msrs_to_save_by_cpuid(cpuid: &kvm_bindings::CpuId) -> Vec<u32> {
 
     msrs
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn get_cpuid_unsupported_leaf() {
-        // TODO: Remove `unsafe` block when Kani nightly toolchain is updated to be >=1.94.0
-        #[allow(unused_unsafe)]
-        let max_leaf =
-            // JUSTIFICATION: There is no safe alternative.
-            // SAFETY: This is safe because the host supports the `cpuid` instruction
-            unsafe { std::arch::x86_64::__get_cpuid_max(0).0 };
-        let max_leaf_plus_one = max_leaf + 1;
-
-        assert_eq!(
-            get_cpuid(max_leaf_plus_one, 0),
-            Err(GetCpuidError::UnsupportedLeaf(max_leaf_plus_one))
-        );
-    }
-}

@@ -482,7 +482,7 @@ impl<'a> PrebootApiController<'a> {
             )),
             GetVmInstanceInfo => Ok(VmmData::InstanceInformation(self.instance_info.clone())),
             GetVmmVersion => Ok(VmmData::VmmVersion(self.instance_info.vmm_version.clone())),
-            // PUT drives/rootfs 接口，配置虚拟机的 rootfs
+            // PUT drives/rootfs 接口，配置虚拟机的 rootfs 和 block 设备
             InsertBlockDevice(config) => self.insert_block_device(config),
             InsertPmemDevice(config) => self.insert_pmem_device(config),
             InsertNetworkDevice(config) => self.insert_net_device(config),
@@ -805,6 +805,7 @@ impl RuntimeApiController {
                 .expect("Poisoned lock")
                 .hot_unplug_device(device_id, event_manager)
                 .map(|()| VmmData::Empty),
+            // vm 接口，state 为 Paused 时调用
             Pause => self.pause(),
             PutMMDS(value) => mmds_put_data(
                 self.vmm
@@ -816,6 +817,7 @@ impl RuntimeApiController {
                     .expect("Poisoned lock"),
                 value,
             ),
+            // vm 接口，state 为 Resumed 时调用
             Resume => self.resume(),
             #[cfg(target_arch = "x86_64")]
             SendCtrlAltDel => self.send_ctrl_alt_del(),

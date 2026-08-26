@@ -246,9 +246,11 @@ impl MachineConfig {
         // 虚拟机核的数量
         let vcpu_count = update.vcpu_count.unwrap_or(self.vcpu_count);
 
+        
         // guest 是否使用超线程
         let smt = update.smt.unwrap_or(self.smt);
 
+        
         #[cfg(target_arch = "aarch64")]
         if smt {
             return Err(MachineConfigError::SmtNotSupported);

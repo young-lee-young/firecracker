@@ -62,8 +62,10 @@ pub enum VcpuError {
 #[derive(Debug)]
 pub struct VcpuConfig {
     /// Number of guest VCPUs.
+    /// CPU 的数量
     pub vcpu_count: u8,
     /// Enable simultaneous multithreading in the CPUID configuration.
+    /// 是否使用超线程
     pub smt: bool,
     /// Configuration for vCPU
     pub cpu_config: CpuConfiguration,

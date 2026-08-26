@@ -31,8 +31,6 @@ pub enum ApiServerError {
     FailedToBindSocket(String),
     /// Failed to bind and run the HTTP server: {0}
     FailedToBindAndRunHttpServer(ServerError),
-    /// Failed to build MicroVM from Json: {0}
-    BuildFromJson(crate::BuildFromJsonError),
     /// Missing vmm seccomp filter
     MissingSeccompFilter,
     /// Failed to install vmm seccomp filter: {0}
@@ -69,8 +67,10 @@ impl ApiServerAdapter {
             request: None,
         }));
 
-        // 把 api 加入到时间通知里面
+
+        // 把 api eventfd 加入到 event_manager 里面来管理
         event_manager.add_subscriber(api_adapter.clone());
+
 
         loop {
             // run() 方法就是在处理 epoll 事件
@@ -194,7 +194,6 @@ VMM thread 做的是：
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_with_api(
     seccomp_filters: &mut BpfThreadMap,
-    config_json: Option<String>,
     bind_path: PathBuf,
     instance_info: InstanceInfo,
     process_time_reporter: ProcessTimeReporter,
@@ -215,6 +214,7 @@ pub(crate) fn run_with_api(
     // EFD_SEMAPHORE 表示每次调用 read() 方法只减 1
     let api_event_fd = EventFd::new(libc::EFD_SEMAPHORE).expect("Cannot create API Eventfd.");
 
+
     // FD used to signal API thread to stop/shutdown.
     // VMM 线程通知 API 线程退出
     let api_kill_switch = EventFd::new(libc::EFD_NONBLOCK).expect("Cannot create API kill switch.");
@@ -232,6 +232,7 @@ pub(crate) fn run_with_api(
     let api_seccomp_filter = seccomp_filters
         .remove("api")
         .expect("Missing seccomp filter for API thread.");
+
 
     // bind_path 就是监听的 socket，就是 --api-sock 传进来的那个参数
     let mut server = match HttpServer::new(&bind_path) {
@@ -254,6 +255,7 @@ pub(crate) fn run_with_api(
         .add_kill_switch(api_kill_switch_clone)
         .expect("Cannot add HTTP server kill switch");
 
+
     // 启动 API 线程
     // Start the separate API thread.
     let api_thread = thread::Builder::new()
@@ -270,25 +272,16 @@ pub(crate) fn run_with_api(
         })
         .expect("API thread spawn failed.");
 
+
+    // 管理所有的 event
     let mut event_manager = EventManager::new().expect("Unable to create EventManager");
 
+
     // Configure, build and start the microVM.
-    let build_result = match config_json {
-        Some(json) => super::build_microvm_from_json(
-            seccomp_filters,
-            &mut event_manager,
-            json,
-            instance_info,
-            boot_timer_enabled,
-            pci_enabled,
-            mmds_size_limit,
-            metadata_json,
-        )
-        .map_err(ApiServerError::BuildFromJson),
-        // 在执行 build_microvm_from_requests 时，event_manager 还没有 run
-        // 也就是 InstanceStart 前的请求会被 build_microvm_from_requests 处理
-        // InstanceStart 后的请求就由 event_manager 处理
-        None => PrebootApiController::build_microvm_from_requests(
+    // 在执行 build_microvm_from_requests 时，event_manager 还没有 run
+    // 也就是 InstanceStart 前的请求会被 build_microvm_from_requests 处理
+    // InstanceStart 后的请求就由 event_manager 处理
+    let build_result = PrebootApiController::build_microvm_from_requests(
             seccomp_filters,
             &mut event_manager,
             instance_info,
@@ -300,8 +293,7 @@ pub(crate) fn run_with_api(
             mmds_size_limit,
             metadata_json,
         )
-        .map_err(ApiServerError::BuildMicroVmError),
-    };
+        .map_err(ApiServerError::BuildMicroVmError);
 
     // INVARIANT: seccomp must be applied before entering the event loop.
     // No guest-facing operations may occur between builder return and filter installation.
