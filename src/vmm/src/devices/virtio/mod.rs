@@ -24,7 +24,6 @@ pub mod persist;
 pub mod pmem;
 pub mod queue;
 pub mod rng;
-pub mod test_utils;
 pub mod transport;
 pub mod vhost_user;
 pub mod vhost_user_metrics;

@@ -22,7 +22,6 @@ mod event_handler;
 pub mod metrics;
 pub mod persist;
 mod tap;
-pub mod test_utils;
 
 mod generated;
 

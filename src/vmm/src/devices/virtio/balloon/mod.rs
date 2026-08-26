@@ -7,7 +7,6 @@ pub mod device;
 mod event_handler;
 pub mod metrics;
 pub mod persist;
-pub mod test_utils;
 mod util;
 
 pub use self::device::{Balloon, BalloonConfig, BalloonStats};

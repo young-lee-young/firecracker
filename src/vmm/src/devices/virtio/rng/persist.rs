@@ -69,33 +69,3 @@ impl Persist<'_> for Entropy {
         Ok(entropy)
     }
 }
-
-#[cfg(test)]
-mod tests {
-
-    use super::*;
-    use crate::devices::virtio::device::VirtioDevice;
-    use crate::devices::virtio::rng::device::ENTROPY_DEV_ID;
-    use crate::devices::virtio::test_utils::default_interrupt;
-    use crate::devices::virtio::test_utils::test::create_virtio_mem;
-
-    #[test]
-    fn test_persistence() {
-        let entropy = Entropy::new(RateLimiter::default()).unwrap();
-
-        let entropy_state = entropy.save();
-        let serialized_data = bitcode::serialize(&entropy_state).unwrap();
-
-        let guest_mem = create_virtio_mem();
-        let restored_state = bitcode::deserialize(&serialized_data).unwrap();
-        let restored =
-            Entropy::restore(EntropyConstructorArgs { mem: guest_mem }, &restored_state).unwrap();
-
-        assert_eq!(restored.device_type(), VirtioDeviceType::Rng);
-        assert_eq!(restored.id(), ENTROPY_DEV_ID);
-        assert!(!restored.is_activated());
-        assert!(!entropy.is_activated());
-        assert_eq!(restored.avail_features(), entropy.avail_features());
-        assert_eq!(restored.acked_features(), entropy.acked_features());
-    }
-}

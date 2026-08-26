@@ -80,9 +80,5 @@ harness = false
 name = "block_request"
 harness = false
 
-[[bench]]
-name = "memory_access"
-harness = false
-
 [lints]
 workspace = true

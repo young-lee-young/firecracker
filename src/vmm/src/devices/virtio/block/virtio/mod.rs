@@ -9,7 +9,6 @@ mod io;
 pub mod metrics;
 pub mod persist;
 pub mod request;
-pub mod test_utils;
 
 use vm_memory::GuestMemoryError;
 
