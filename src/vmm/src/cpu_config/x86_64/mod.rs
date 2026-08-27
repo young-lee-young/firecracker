@@ -113,6 +113,7 @@ impl CpuConfiguration {
             }
         }
 
+        
         // 把 cpu template 中对 msr 的修改，应用上
         for modifier in &template.msr_modifiers {
             if let Some(reg_value) = msrs.get_mut(&modifier.addr) {

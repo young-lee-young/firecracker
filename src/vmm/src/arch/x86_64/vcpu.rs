@@ -227,7 +227,7 @@ impl KvmVcpu {
 
 
         // Set CPUID in the KVM
-        // 真正调用 KVM 设置 CPUID 信息
+        // 真正调用 KVM 设置 CPUID 信息，这里真正限制了 guest 中的 CPUID 能力
         // 参考 https://docs.kernel.org/virt/kvm/api.html#kvm-set-cpuid
         self.fd
             .set_cpuid2(&kvm_cpuid)
