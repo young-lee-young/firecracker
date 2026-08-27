@@ -287,6 +287,11 @@ pub struct PrebootApiController<'a> {
     vm_resources: &'a mut VmResources,
     event_manager: &'a mut EventManager,
     /// The [`Vmm`] object constructed through requests
+    /// 这个值就是 vmm 的实例，在 2 个地方会把他赋值，这个值一旦有值，说明整个虚拟机就可以启动了
+    /// 1. 在 start_microvm 最后
+    /// 2. 在 load_snapshot 最后
+    /// 在这里要注意，为什么 resume 的时候没有赋值呢？
+    /// 因为在 pause 的时候没有把 vmm 实例给删除，vmm 实例还存在
     pub built_vmm: Option<Arc<Mutex<Vmm>>>,
     // Configuring boot specific resources will set this to true.
     // Loading from snapshot will not be allowed once this is true.
@@ -421,6 +426,7 @@ impl<'a> PrebootApiController<'a> {
 
             // Process the request.
             // 处理 vmm 配置请求
+            // 在这里其实会实例化出一个 vmm
             let res = preboot_controller.handle_preboot_request(*req);
 
             // Send back the response.
@@ -665,12 +671,13 @@ impl<'a> PrebootApiController<'a> {
     ) -> Result<VmmData, LoadSnapshotError> {
         let load_start_us = get_time_us(ClockType::Monotonic);
 
-        // 普通启动不允许调用 load_snapshot 方法
+        // boot_path 这个字段标记普通启动不允许调用 load_snapshot 方法
         if self.boot_path {
             let err = LoadSnapshotError::LoadSnapshotNotAllowed;
             info!("{}", err);
             return Err(err);
         }
+
 
         // Restore VM from snapshot
         let vmm = restore_from_snapshot(
@@ -684,6 +691,8 @@ impl<'a> PrebootApiController<'a> {
             // If restore fails, we consider the process is too dirty to recover.
             self.fatal_error = Some(BuildMicrovmFromRequestsError::Restore);
         })?;
+
+
         // Resume VM
         if load_params.resume_vm {
             vmm.lock()
@@ -694,13 +703,12 @@ impl<'a> PrebootApiController<'a> {
                     self.fatal_error = Some(BuildMicrovmFromRequestsError::Resume);
                 })?;
         }
+
+
         // Set the VM
+        // 设置下 vmm，这表示这个虚拟机可以启动了
         self.built_vmm = Some(vmm);
 
-        debug!(
-            "'load snapshot' VMM action took {} us.",
-            update_metric_with_elapsed_time(&METRICS.latencies_us.vmm_load_snapshot, load_start_us)
-        );
 
         Ok(VmmData::Empty)
     }
@@ -722,6 +730,7 @@ impl RuntimeApiController {
         use self::VmmAction::*;
         match request {
             // Supported operations allowed post-boot.
+            // snapshot/create 接口
             CreateSnapshot(snapshot_create_cfg) => self.create_snapshot(&snapshot_create_cfg),
             FlushMetrics => self.flush_metrics(),
             GetBalloonConfig => self
@@ -949,32 +958,11 @@ impl RuntimeApiController {
 
         let mut locked_vmm = self.vmm.lock().unwrap();
         let vm_info = VmInfo::from(&*locked_vmm);
-        let create_start_us = get_time_us(ClockType::Monotonic);
+
 
         create_snapshot(&mut locked_vmm, &vm_info, create_params)?;
 
-        match create_params.snapshot_type {
-            SnapshotType::Full => {
-                let elapsed_time_us = update_metric_with_elapsed_time(
-                    &METRICS.latencies_us.vmm_full_create_snapshot,
-                    create_start_us,
-                );
-                info!(
-                    "'create full snapshot' VMM action took {} us.",
-                    elapsed_time_us
-                );
-            }
-            SnapshotType::Diff => {
-                let elapsed_time_us = update_metric_with_elapsed_time(
-                    &METRICS.latencies_us.vmm_diff_create_snapshot,
-                    create_start_us,
-                );
-                info!(
-                    "'create diff snapshot' VMM action took {} us.",
-                    elapsed_time_us
-                );
-            }
-        }
+
         Ok(VmmData::Empty)
     }
 

@@ -78,12 +78,16 @@ impl ApiServerAdapter {
                 .run()
                 .expect("EventManager events driver fatal error");
 
+
             // 真正处理 api 的事件
             api_adapter
                 .lock()
                 .expect("Poisoned lock")
                 .handle_request(event_manager);
 
+
+            // 这里会检查 vmm 的状态是不是退出状态
+            // 如果是退出状态，那么会退出当前的循环，也就是把 vmm 退出
             match vmm.lock().unwrap().shutdown_exit_code() {
                 Some(FcExitCode::Ok) => break,
                 Some(exit_code) => return Err(ApiServerError::MicroVMStoppedWithError(exit_code)),

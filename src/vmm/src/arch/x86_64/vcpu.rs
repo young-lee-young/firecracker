@@ -280,6 +280,11 @@ impl KvmVcpu {
         crate::arch::x86_64::interrupts::set_lint(&self.fd)?;
         Ok(())
     }
+    
+    /// Sets a Memory Mapped IO bus for this vcpu
+    pub fn set_mmio_bus(&mut self, mmio_bus: Arc<Bus>) {
+        self.peripherals.mmio_bus = Some(mmio_bus);
+    }
 
     /// Sets a Port Mapped IO bus for this vcpu.
     pub fn set_pio_bus(&mut self, pio_bus: Arc<Bus>) {

@@ -63,11 +63,19 @@ impl<T: Debug> StateMachine<T> {
     /// `machine` - a mutable reference to the object running through the various states.
     /// `starting_state_fn` - a `fn(&mut T) -> StateMachine<T>` that should be the handler for
     ///                       the initial state.
+    /// 这里的 machine 就是 vCPU 对象自己
+    /// starting_state_fn 就是 vCPU 中实现的处理状态机的方法
     pub fn run(machine: &mut T, starting_state_fn: StateFn<T>) {
         // Start off in the `starting_state` state.
+        // 实例化一个状态机
         let mut state_machine = StateMachine::new(Some(starting_state_fn));
+
+
         // While current state is not a final/end state, keep churning.
+        // 执行状态机后，如果返回的状态机有 function，那么会继续执行这个 function
+        // 直到这个 function 是 None，在 finish 的时候 function 才是 None
         while let Some(state_fn) = state_machine.function {
+            // 执行状态机方法，返回的结果再赋值给 state_machine
             // Run the current state handler, and get the next one.
             state_machine = state_fn(machine);
         }

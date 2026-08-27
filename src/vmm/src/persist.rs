@@ -110,12 +110,16 @@ pub struct MicrovmState {
 pub struct GuestRegionUffdMapping {
     /// Base host virtual address where the guest memory contents for this
     /// region should be copied/populated.
+    /// firecracker 虚拟内存地址
     pub base_host_virt_addr: u64,
     /// Region size.
+    /// 当前 region 大小
     pub size: usize,
     /// Offset in the backend file/buffer where the region contents are.
+    /// 该段 region 在后端文件中的偏移
     pub offset: u64,
     /// The configured page size for this memory region.
+    /// 一页大小
     pub page_size: usize,
     /// The configured page size **in bytes** for this memory region. The name is
     /// wrong but cannot be changed due to being API, so this field is deprecated,
@@ -168,12 +172,15 @@ pub fn create_snapshot(
     vm_info: &VmInfo,
     params: &CreateSnapshotParams,
 ) -> Result<(), CreateSnapshotError> {
+    // 保存 snapshot 文件
     let microvm_state = vmm
         .save_state(vm_info)
         .map_err(CreateSnapshotError::MicrovmState)?;
 
     snapshot_state_to_file(&microvm_state, &params.snapshot_path)?;
 
+
+    // 保存内存
     let kvm_vm = vmm.vm.as_kvm().ok_or_else(|| {
         CreateSnapshotError::MicrovmState(MicrovmStateError::NotAllowed(
             "snapshot requires KVM".into(),
@@ -181,9 +188,13 @@ pub fn create_snapshot(
     })?;
     kvm_vm.snapshot_memory_to_file(&params.mem_file_path, params.snapshot_type)?;
 
+
     // We need to mark queues as dirty again for all activated devices. The reason we
     // do it here is that we don't mark pages as dirty during runtime
     // for queue objects.
+    // firecracker 直接通过指针访问和修改 virtqueue 的内存（为了访问的效率），这些可能还没被标记为 dirty
+    // 所以这里要把这些 virtqueue 内存标记为脏
+    // 防止 resume 后，下一次创建 diff snapshot 时候，这些内存被认为是干净的
     vmm.device_manager
         .mark_virtio_queue_memory_dirty(kvm_vm.guest_memory());
 
@@ -544,12 +555,16 @@ fn guest_memory_from_uffd(
 
     let mut uffd_builder = UffdBuilder::new();
 
+
     // We only make use of this if balloon devices are present, but we can enable it unconditionally
     // because the only place the kernel checks this is in a hook from madvise, e.g. it doesn't
     // actively change the behavior of UFFD, only passively. Without balloon devices
     // we never call madvise anyway, so no need to put this into a conditional.
+    // 如果使用了内存气球，那么需要 uffd 支持 REMOVE 事件，也就是把这个页给清理掉了
     uffd_builder.require_features(FeatureFlags::EVENT_REMOVE);
 
+
+    // 创建 uffd
     let uffd = uffd_builder
         .close_on_exec(true)
         .non_blocking(true)
@@ -557,12 +572,17 @@ fn guest_memory_from_uffd(
         .create()
         .map_err(GuestMemoryFromUffdError::Create)?;
 
+
+    // 向uffd 中注册内存
     for mem_region in guest_memory.iter() {
         uffd.register(mem_region.as_ptr().cast(), mem_region.size() as _)
             .map_err(GuestMemoryFromUffdError::Register)?;
     }
 
+
+    // 把 uffd 的文件描述符和内存布局，通过接口给进来的 socket 传递回去
     send_uffd_handshake(mem_uds_path, &backend_mappings, &uffd)?;
+
 
     Ok((guest_memory, Some(uffd)))
 }

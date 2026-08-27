@@ -457,6 +457,10 @@ impl Vmm {
     }
 
     /// Sends a resume command to the vCPUs.
+    /// 3 个地方会调用这个方法
+    /// 1. 创建 firecracker 的时候，最后启动的时候
+    /// 2. resume 接口
+    /// 3. load snapshot 的时候
     pub fn resume_vm(&mut self) -> Result<(), VmmError> {
         let kvm_vm = self
             .vm
@@ -474,8 +478,13 @@ impl Vmm {
             .vm
             .as_kvm()
             .ok_or_else(|| VmmError::NotSupportedOnVmType(self.vm.type_name()))?;
+
+
+        // pause 核心逻辑
         kvm_vm.pause_vcpus()?;
         self.instance_info.state = VmState::Paused;
+
+
         Ok(())
     }
 
@@ -502,13 +511,19 @@ impl Vmm {
         // might modify the VirtIO transport and send an interrupt to the guest. If we save KVM
         // state before we save device state, that interrupt will never be delivered to the guest
         // upon resuming from the snapshot.
+        // 设备状态
         let device_states = self.device_manager.save();
+
+
         let kvm_vm = self
             .vm
             .as_kvm()
             .ok_or_else(|| MicrovmStateError::NotAllowed("save_state requires KVM".into()))?;
+        // vcpu 状态
         let vcpu_states = kvm_vm.save_vcpu_states()?;
+        // kvm 状态
         let kvm_state = kvm_vm.kvm().save_state();
+        // vm 状态
         let vm_state = {
             #[cfg(target_arch = "x86_64")]
             {
@@ -785,6 +800,8 @@ impl Drop for Vmm {
 
 impl MutEventSubscriber for Vmm {
     /// Handle a read event (EPOLLIN).
+    /// 这个方法主要是在处理退出的逻辑
+    /// 检查所有 vCPU 线程都退出了，把自己设置成退出状态
     fn process(&mut self, event: Events, _: &mut EventOps) {
         let source = event.fd();
         let event_set = event.event_set();
@@ -816,6 +833,9 @@ impl MutEventSubscriber for Vmm {
                         // No CPUs exited with error status code, report "Ok"
                         FcExitCode::Ok
                     };
+
+
+                    // 把自己设置成退出状态
                     self.stop(exit_code);
                 } else {
                     error!("Spurious EventManager event for handler: Vmm");
@@ -827,6 +847,7 @@ impl MutEventSubscriber for Vmm {
     fn init(&mut self, ops: &mut EventOps) {
         match &self.vm {
             Vm::Kvm(kvm_vm) => {
+                // 这里注册的就是创建 vm 的时候创建的 eventfd，用来监听 vCPU 的退出事件
                 if let Err(err) = ops.add(Events::new(kvm_vm.vcpus_exit_evt(), EventSet::IN)) {
                     error!("Failed to register vmm exit event: {}", err);
                 }

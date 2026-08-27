@@ -116,6 +116,11 @@ pub struct Vcpu {
 impl Vcpu {
     /// Registers a signal handler which kicks the vcpu running on the current thread, if there is
     /// one.
+    /// 信号处理的整个流程
+    /// 1. vmm 线程发送信号
+    /// 2. Linux 内核接收到信号
+    /// 3. 找到目标 vCPU 线程
+    /// 4. 向线程投递 SIGRTMIN 信号
     fn register_kick_signal_handler(&mut self) {
         extern "C" fn handle_signal(
             _: c_int,
@@ -124,10 +129,14 @@ impl Vcpu {
         ) {
             // We write to the immediate_exit from other thread, so make sure the read in the
             // KVM_RUN sees the up to date value
+            // 这里就是确保 vCPU 线程可以看到 vmm 线程写入的值，也就是 immediate_exit 值
             fence(Ordering::Acquire);
         }
 
 
+        // 给 vCPU 线程注册信号处理函数
+        // 信号就是 sigrtmin() + VCPU_RTSIG_OFFSET：这个是实时信号（就是程序自定义的信号）
+        // 具体是哪个 vCPU 线程处理，是由 vmm 线程在发送信号的时候指定的
         register_signal_handler(sigrtmin() + VCPU_RTSIG_OFFSET, handle_signal)
             .expect("Failed to register vcpu signal handler");
     }
@@ -143,8 +152,10 @@ impl Vcpu {
         let (event_sender, event_receiver) = channel();
         let (response_sender, response_receiver) = channel();
 
+
         // 调用 KVM 系统调用创建 vCPU
         let kvm_vcpu = KvmVcpu::new(index, vm).unwrap();
+
 
         Ok(Vcpu {
             exit_evt,
@@ -160,7 +171,12 @@ impl Vcpu {
 
     /// Sets a MMIO bus for this vcpu.
     pub fn set_mmio_bus(&mut self, mmio_bus: Arc<Bus>) {
-        self.kvm_vcpu.peripherals.mmio_bus = Some(mmio_bus);
+        self.kvm_vcpu.set_mmio_bus(mmio_bus);
+    }
+
+    /// Sets a PIO bus for this vcpu.
+    pub fn set_pio_bus(&mut self, pio_bus: Arc<Bus>) {
+        self.kvm_vcpu.set_pio_bus(pio_bus);
     }
 
     /// Attaches the fields required for debugging
@@ -198,15 +214,18 @@ impl Vcpu {
             .map_err(StartThreadedError::CopyFd)?;
 
 
-        // 起一个 vCPU 线程
+        // 这里起一个 vCPU 线程
         let vcpu_thread = thread::Builder::new()
             // 这个 name 使用 ps -T 可以看到名为 fc_vcpu 的线程
             .name(format!("fc_vcpu {}", self.kvm_vcpu.index))
             // spawn 这里面涉及到并发
             .spawn(move || {
                 let filter = &*seccomp_filter;
-                self.register_kick_signal_handler();
 
+
+                // 注册新号处理函数
+                // vmm 会给 vCPU 线程发送信号
+                self.register_kick_signal_handler();
 
 
                 // Synchronization to make sure thread local data is initialized.
@@ -214,6 +233,7 @@ impl Vcpu {
                 barrier.wait();
 
 
+                // 这里是真正执行 guest 代码和处理 KVM EXIT 逻辑的地方
                 self.run(filter);
             })
             .map_err(StartThreadedError::Spawn)?;
@@ -236,6 +256,7 @@ impl Vcpu {
         // Load seccomp filters for this vCPU thread.
         // Execution panics if filters cannot be loaded, use --no-seccomp if skipping filters
         // altogether is the desired behaviour.
+        // TODO Lee P1 学习 seccomp_filter 的知识
         if let Err(err) = crate::seccomp::apply_filter(seccomp_filter) {
             panic!(
                 "Failed to set the requested seccomp filters on vCPU {}: Error: {}",
@@ -243,7 +264,9 @@ impl Vcpu {
             );
         }
 
+
         // Start running the machine state in the `Paused` state.
+        // 让状态机执行 vCPU paused 方法
         StateMachine::run(self, Self::paused);
     }
 
@@ -325,24 +348,36 @@ impl Vcpu {
         state
     }
 
+
     // This is the main loop of the `Paused` state.
+    // 当前 vCPU 处于 Pause 状态时，如果收到消息，会执行这里
     fn paused(&mut self) -> StateMachine<Self> {
         match self.event_receiver.recv() {
             // Paused ---- Resume ----> Running
             Ok(VcpuEvent::Resume) => {
+                // 把 immediate_exit 从 1 设置成 0，表示当前 vCPU 已经在运行
                 if self.kvm_vcpu.fd.get_kvm_run().immediate_exit == 1u8 {
                     warn!(
                         "Received a VcpuEvent::Resume message with immediate_exit enabled. \
                          immediate_exit was disabled before proceeding"
                     );
+                    // 这里设置成 0 后，内核 KVM 会读取这个值
                     self.kvm_vcpu.fd.set_kvm_immediate_exit(0);
                 }
+
+
                 self.response_sender
                     .send(VcpuResponse::Resumed)
                     .expect("vcpu channel unexpectedly closed");
+
+
                 // Move to 'running' state.
+                // 轮转到 running 状态
                 StateMachine::next(Self::running)
             }
+
+
+            // 如果收到 Puase 事件，什么都不做
             Ok(VcpuEvent::Pause) => {
                 self.response_sender
                     .send(VcpuResponse::Paused)
@@ -400,6 +435,8 @@ impl Vcpu {
             METRICS.vcpu.failures.inc();
             error!("Failed signaling vcpu exit event: {}", err);
         }
+
+
         // From this state we only accept going to finished.
         loop {
             self.response_sender
@@ -423,7 +460,12 @@ impl Vcpu {
             return Ok(VcpuEmulation::Interrupted);
         }
 
+
+        // 在这里真正执行了 KVM RUN，会阻塞在这里
+        // 直到 KVM RUN 返回时，说明有要处理的事件
         match self.kvm_vcpu.fd.run() {
+            // 如果 KVM RUN 返回了错误，并且错误是 EINTR（Interrupted system call）
+            // 说明系统调用被信号中断了，说明 vmm 可能向 vCPU 发送了一个信号
             Err(ref err) if err.errno() == libc::EINTR => {
                 self.kvm_vcpu.fd.set_kvm_immediate_exit(0);
                 // Notify that this KVM_RUN was interrupted.
@@ -439,6 +481,9 @@ impl Vcpu {
 
                 Ok(VcpuEmulation::Paused)
             }
+
+
+            // kvm run 返回了需要处理的事件或者其他错误
             emulation_result => handle_kvm_exit(&mut self.kvm_vcpu.peripherals, emulation_result),
         }
     }
@@ -450,7 +495,10 @@ fn handle_kvm_exit(
     emulation_result: Result<VcpuExit, errno::Error>,
 ) -> Result<VcpuEmulation, VcpuError> {
     match emulation_result {
+        // KVM RUN 需要处理的事件
         Ok(run) => match run {
+            // MMIO 缓冲区数据读取
+            // 注意：这里只是读取 MMIO 寄存器数据，不是真正读取设备的数据
             VcpuExit::MmioRead(addr, data) => {
                 data.fill(0);
                 if let Some(mmio_bus) = &peripherals.mmio_bus {
@@ -522,6 +570,9 @@ fn handle_kvm_exit(
         },
         // The unwrap on raw_os_error can only fail if we have a logic
         // error in our code in which case it is better to panic.
+
+
+        // KVM RUN 返回其他错误
         Err(ref err) => match err.errno() {
             libc::EAGAIN => Ok(VcpuEmulation::Handled),
             libc::ENOSYS => {
@@ -633,17 +684,28 @@ impl VcpuHandle {
     /// When [`vmm_sys_util::linux::signal::Killable::kill`] errors.
     pub fn send_event(&mut self, event: VcpuEvent) -> Result<(), VcpuSendEventError> {
         // Use expect() to crash if the other thread closed this channel.
+        // 把 Pause 事件通过 event_sender 放到 channel 里面
         self.event_sender
             .send(event)
             .expect("event sender channel closed on vcpu end.");
+
+
         // Kick the vcpu so it picks up the message.
         // Add a fence to ensure the write is visible to the vpu thread
+        // 这里设置了 kvm_run 的 immediate_exit，KVM 内核会检查这个值，检查到是 1，会退出 KVM_RUN
         self.vcpu_fd.set_kvm_immediate_exit(1);
+        // 这里会确保刚刚写入的 immediate_exit 值会被 vCPU 线程看到
         fence(Ordering::Release);
+
+
+        // 向 vcpu 线程发送 kill 信号
+        // 这里内核就知道目标的 vCPU 线程了
         self.vcpu_thread
             .as_ref()
             // Safe to unwrap since constructor make this 'Some'.
             .unwrap()
+            // 这里的 kill 不是 Linux 中的 kill 命令，而是 Linux signal 机制
+            // 这里是向 vCPU 线程发送 sigrtmin() + VCPU_RTSIG_OFFSET 信号
             .kill(sigrtmin() + VCPU_RTSIG_OFFSET)?;
         Ok(())
     }

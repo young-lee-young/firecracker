@@ -286,8 +286,9 @@ impl KvmVm {
             // 这里所有的 vCPU 都会使用同一个 mmio_bus 和 pio_bus
             // 哪个 vCPU 触发了读写操作，都会由 firecracker 中对应的 vCPU 来处理
             vcpu.set_mmio_bus(self.common.mmio_bus.clone());
+
             #[cfg(target_arch = "x86_64")]
-            vcpu.kvm_vcpu.set_pio_bus(self.pio_bus.clone());
+            vcpu.set_pio_bus(self.pio_bus.clone());
 
 
             // start_threaded 返回了一个 vcpu handle，放到 handles 里面
@@ -313,11 +314,16 @@ impl KvmVm {
     /// Sends a pause event to all vCPUs and waits for acknowledgement.
     pub fn pause_vcpus(&self) -> Result<(), crate::VmmError> {
         let mut handles = self.vcpus_handles();
+
+
+        // 通过 handles 给所有的 vCPU 发送 Pause 事件
         handles
             .iter_mut()
             .try_for_each(|handle| handle.send_event(crate::VcpuEvent::Pause))
             .map_err(|_| crate::VmmError::VcpuMessage)?;
 
+
+        // 接收所有的 vCPU 线程的响应，如果有一个线程的响应不是 Paused，那么整个都失败
         if handles
             .iter()
             .map(|handle| {

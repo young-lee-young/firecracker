@@ -408,6 +408,7 @@ pub fn build_microvm_for_boot(
         boot_cmdline,
     )?;
 
+
     let vmm = Vmm {
         instance_info: instance_info.clone(),
         machine_config: vm_resources.machine_config.clone(),
@@ -446,8 +447,12 @@ pub fn build_microvm_for_boot(
         debug!("No GDB socket provided not starting gdb server.");
     }
 
+
+    // 如果想要加入事件订阅，那么需要实现 2 个方法，init 和 process
     event_manager.add_subscriber(vmm.clone());
 
+    
+    // 这里把 vmm 返回回去了
     Ok(vmm)
 }
 
