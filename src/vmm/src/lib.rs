@@ -432,6 +432,8 @@ impl Vmm {
 
     /// Check if the VM has any devices without snapshot support
     pub fn check_unsnapshottable_devices(&self) -> Result<(), MicrovmStateError> {
+        // Block + vhost-user 这种类型的设备是不能被 snapshot 的
+
         let mut tuples = Vec::new();
         self.device_manager
             .for_each_virtio_device(|device_type, device| {
@@ -504,6 +506,7 @@ impl Vmm {
 
     /// Saves the state of a paused Microvm.
     pub fn save_state(&mut self, vm_info: &VmInfo) -> Result<MicrovmState, MicrovmStateError> {
+        // 如果有设备不能被 snapshot，就会退出
         self.check_unsnapshottable_devices()?;
 
         // We need to save device state before saving KVM state.
@@ -511,7 +514,7 @@ impl Vmm {
         // might modify the VirtIO transport and send an interrupt to the guest. If we save KVM
         // state before we save device state, that interrupt will never be delivered to the guest
         // upon resuming from the snapshot.
-        // 设备状态
+        // 保存设备的状态
         let device_states = self.device_manager.save();
 
 
@@ -519,24 +522,24 @@ impl Vmm {
             .vm
             .as_kvm()
             .ok_or_else(|| MicrovmStateError::NotAllowed("save_state requires KVM".into()))?;
-        // vcpu 状态
+
+
+        // 保存 vcpu 状态，主要是向 vCPU 线程发送事件来获取状态
+        // 在 vCPU 线程中，vCPU 会
         let vcpu_states = kvm_vm.save_vcpu_states()?;
-        // kvm 状态
+
+
+        // kvm 状态，很简单，只是把 kvm 的能力保存了一下
         let kvm_state = kvm_vm.kvm().save_state();
+
+
         // vm 状态
         let vm_state = {
             #[cfg(target_arch = "x86_64")]
             {
+                // 这里是 vmm 直接向 KVM 来查询的状态
                 kvm_vm
                     .save_state()
-                    .map_err(MicrovmStateError::SaveVmState)?
-            }
-            #[cfg(target_arch = "aarch64")]
-            {
-                let mpidrs = construct_kvm_mpidrs(&vcpu_states);
-
-                kvm_vm
-                    .save_state(&mpidrs)
                     .map_err(MicrovmStateError::SaveVmState)?
             }
         };

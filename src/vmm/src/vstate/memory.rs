@@ -531,6 +531,8 @@ impl GuestMemoryRegion for GuestRegionMmapExt {
 /// 当 file 是 None 时，表示使用匿名内存，那就 mmap 一段匿名内存就可以
 ///
 /// 当 file 是 memfd 时，表示给 memfd 映射内存，那么还需要记录内存和 memfd 的对应关系
+///
+/// 更新：这里的 file 不止是 memfd，还可能是 load snapshot 时候的 memfile
 pub fn create(
     regions: impl Iterator<Item = (GuestAddress, usize)>,
     mmap_flags: libc::c_int,

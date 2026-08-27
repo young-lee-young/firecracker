@@ -339,6 +339,8 @@ impl KvmVm {
     }
 
     /// Sends a resume event to all vCPUs and waits for acknowledgement.
+    /// 这里也很简单了，就是向 vCPU 线程发送 Resume 事件
+    /// 然后在 vCPU 的状态机来处理
     pub fn resume_vcpus(&self) -> Result<(), crate::VmmError> {
         let mut handles = self.vcpus_handles();
         handles
@@ -366,6 +368,9 @@ impl KvmVm {
     ) -> Result<Vec<crate::vstate::vcpu::VcpuState>, crate::persist::MicrovmStateError> {
         use crate::persist::MicrovmStateError;
 
+
+        // 这里会给 vCPU 线程发送 SaveState 事件
+        // 这个事件还是在 vCPU 的状态机里面来处理
         let mut handles = self.vcpus_handles();
         for handle in handles.iter_mut() {
             handle
@@ -373,6 +378,8 @@ impl KvmVm {
                 .map_err(MicrovmStateError::SignalVcpu)?;
         }
 
+
+        // 等待所有的事件返回响应
         let vcpu_responses = handles
             .iter()
             .map(|handle| {
@@ -383,6 +390,9 @@ impl KvmVm {
             .collect::<Result<Vec<crate::VcpuResponse>, _>>()
             .map_err(|_| MicrovmStateError::UnexpectedVcpuResponse)?;
 
+        
+        // 检查所有的事件处理的是否成功
+        // 成功的话会收集 vCPU 的状态
         vcpu_responses
             .into_iter()
             .map(|response| match response {

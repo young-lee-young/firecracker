@@ -378,6 +378,8 @@ pub fn restore_from_snapshot(
     vm_resources: &mut VmResources,
 ) -> Result<Arc<Mutex<Vmm>>, RestoreFromSnapshotError> {
     let mut microvm_state = snapshot_state_from_file(&params.snapshot_path)?;
+
+
     for entry in &params.network_overrides {
         microvm_state
             .device_states

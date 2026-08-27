@@ -563,15 +563,17 @@ fn handle_kvm_exit(
                     )))
                 }
             },
+            // 其他的事件在这里处理
+            // 在 x86 架构中，这里处理的是 Port IO 的逻辑
             arch_specific_reason => {
                 // run specific architecture emulation.
                 peripherals.run_arch_emulation(arch_specific_reason)
             }
         },
+
+
         // The unwrap on raw_os_error can only fail if we have a logic
         // error in our code in which case it is better to panic.
-
-
         // KVM RUN 返回其他错误
         Err(ref err) => match err.errno() {
             libc::EAGAIN => Ok(VcpuEmulation::Handled),

@@ -6,6 +6,7 @@ use kvm_ioctls::Kvm as KvmFd;
 
 use crate::arch::x86_64::xstate::{XstateError, request_dynamic_xstate_features};
 use crate::cpu_config::templates::KvmCapability;
+use crate::{debug, info};
 
 /// Architecture specific error for KVM initialization
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
@@ -60,6 +61,10 @@ impl Kvm {
         let supported_cpuid = fd
             .get_supported_cpuid(KVM_MAX_CPUID_ENTRIES)
             .map_err(KvmArchError::GetSupportedCpuId)?;
+
+
+        debug!("supported_cpuid: {supported_cpuid:#?}");
+
 
         Ok(Kvm {
             fd,
