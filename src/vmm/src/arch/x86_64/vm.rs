@@ -278,6 +278,8 @@ pub struct VmState {
 impl fmt::Debug for VmState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("VmState")
+            .field("memory", &self.memory)
+            .field("resource_allocator", &self.resource_allocator)
             .field("pitstate", &self.pitstate)
             .field("clock", &self.clock)
             .field("pic_master", &"?")
