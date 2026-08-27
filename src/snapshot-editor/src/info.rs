@@ -80,7 +80,7 @@ fn info_vcpu_states(snapshot: &Snapshot<MicrovmState>) -> Result<(), InfoVmState
 // 我自己加的查询 snapshot 中的 msr 信息
 fn msr_state(snapshot: &Snapshot<MicrovmState>) -> Result<(), InfoVmStateError> {
     for (i, state) in snapshot.data.vcpu_states.iter().enumerate() {
-        println!("vcpu {vcpu_index}:");
+        println!("vcpu {i}:");
 
         // 额外结构化打印真正的 MSR entry
         println!("saved_msrs:");
