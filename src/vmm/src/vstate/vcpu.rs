@@ -319,7 +319,10 @@ impl Vcpu {
                     .send(VcpuResponse::Resumed)
                     .expect("vcpu channel unexpectedly closed");
             }
+
+
             // SaveState cannot be performed on a running Vcpu.
+            // running 情况下不允许保存 vCPU 状态
             Ok(VcpuEvent::SaveState) => {
                 self.response_sender
                     .send(VcpuResponse::NotAllowed(String::from(

@@ -244,10 +244,34 @@ pub fn msr_should_serialize(index: u32) -> bool {
     if index == MSR_IA32_MCG_CTL {
         return false;
     };
+
+
+    // SERIALIZABLE_MSR_RANGES 记录了需要被序列化的 msr，如果 index 在这些里面，会返回 true
     SERIALIZABLE_MSR_RANGES
         .iter()
         .any(|range| range.contains(index))
 }
+
+
+/**
+在这里 我们学习下 MSR 相关的知识
+
+MSR（Model-Specific Register，模型特定寄存器）
+
+作用：CPU 内部一组特殊寄存器，让操作系统控制或读取某些 CPU 的功能
+
+操作
+读取：ecx 中写入 msr 的 index，通过 RDMSR 指令读取，msr 的值保存在 edx:eax 64 位数据中
+写入：edx:eax 是要写入的 64 位数据，ecx 写入 msr 的 index，通过 WRMSR 指令写入
+
+
+msr 的值是控制 CPU 的功能的，肯定不能让 guest 随意修改宿主机的 CPU 的 msr
+所以需要一套虚拟的 msr 给 guest 使用
+
+
+CPUID 告诉 guest 的 CPU 支持哪些能力
+MSR 则是保存和控制这些能力的状态开关
+*/
 
 /// Returns the list of serializable MSR indices.
 ///
@@ -260,10 +284,17 @@ pub fn msr_should_serialize(index: u32) -> bool {
 /// When:
 /// - [`kvm_ioctls::Kvm::get_msr_index_list()`] errors.
 pub fn get_msrs_to_save(kvm_fd: &Kvm) -> Result<MsrList, MsrError> {
+    // 调用 KVM 获取 msr 的列表
     let mut msr_index_list = kvm_fd
         .get_msr_index_list()
         .map_err(MsrError::GetMsrIndexList)?;
+
+
+    // 保留需要被序列化的 msr
+    // 这些 msr 都是创建 snapshot 的时候需要的 msr
     msr_index_list.retain(|msr_index| msr_should_serialize(*msr_index));
+
+
     Ok(msr_index_list)
 }
 
@@ -365,6 +396,8 @@ const UNDUMPABLE_MSR_RANGES: [MsrRange; 17] = [
 ///
 /// * `index` - The index of the MSR that is checked whether it's needed for serialization.
 pub fn msr_is_dumpable(index: u32) -> bool {
+    // UNDUMPABLE_MSR_RANGES 记录了所有不被 dump 的 msr 的索引，如果 index 在这些里面，就返回 false，不会被 dump
+    // TODO Lee P1 UNDUMPABLE_MSR_RANGES 这些值是怎么确定的，是经验值吗
     !UNDUMPABLE_MSR_RANGES
         .iter()
         .any(|range| range.contains(index))
@@ -381,11 +414,16 @@ pub fn msr_is_dumpable(index: u32) -> bool {
 /// When:
 /// - [`kvm_ioctls::Kvm::get_msr_index_list()`] errors.
 pub fn get_msrs_to_dump(kvm_fd: &Kvm) -> Result<MsrList, MsrError> {
+    // 调用 KVM 获取到 msr 列表，只是获取了 msr 的索引
     let mut msr_index_list = kvm_fd
         .get_msr_index_list()
         .map_err(MsrError::GetMsrIndexList)?;
 
+
+    // 保留需要被 dump 的 msr
     msr_index_list.retain(|msr_index| msr_is_dumpable(*msr_index));
+
+
     Ok(msr_index_list)
 }
 

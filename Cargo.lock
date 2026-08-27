@@ -1372,6 +1372,7 @@ dependencies = [
  "clap-num",
  "displaydoc",
  "libc",
+ "log",
  "log-instrument",
  "semver",
  "thiserror 2.0.18",

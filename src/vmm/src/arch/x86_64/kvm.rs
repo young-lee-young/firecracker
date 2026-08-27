@@ -64,7 +64,7 @@ impl Kvm {
 
         /**
         这里介绍下 CPUID 的原理
-        作用：查询 CPU 具有什么能力
+        作用：查询 CPU 具有什么能力，不是保存的运行过程
 
         pub struct kvm_cpuid2 {
             pub nent: __u32, // 一共有多少项 CPUID
@@ -90,7 +90,7 @@ impl Kvm {
             function: 0,
             index: 0,
             flags: 0,
-            eax: 13, // 查询到的结果是 13，表示基础的的 CPUID 是 13 个，当然还有很多扩展的 CPUID
+            eax: 13, // 查询到的结果是 13，表示基础的 CPUID 是 13 个，当然还有很多扩展的 CPUID
             ebx: 1970169159, // ebx - edx 返回的是 CPU 厂商的信息
             ecx: 1818588270,
             edx: 1231384169,

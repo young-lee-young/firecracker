@@ -386,14 +386,21 @@ impl KvmVcpu {
     fn get_cpuid(&self) -> Result<kvm_bindings::CpuId, KvmVcpuError> {
         let mut cpuid = self
             .fd
+            // vCPU 调用 KVM 获取 CPUID 信息，这里是 guest 的信息
             .get_cpuid2(KVM_MAX_CPUID_ENTRIES)
             .map_err(KvmVcpuError::VcpuGetCpuid)?;
 
+
         // As CPUID.0h:EAX should have the largest CPUID standard function, we don't need to check
         // EBX, ECX and EDX to confirm whether it is a valid entry.
+        // retain 方法表示：内部返回 true 保留这个元素，返回 false 删除这个元素
         cpuid.retain(|entry| {
+            // function 和 index 为 0 时，是查询基础的 CPUID 的数量和 CPU 厂商信息
+            // eax 中的值是标准 CPU ID 的数量，这个值不会为 0
+            // 如果为 0，说明这个值时无效的，要排除掉
             !(entry.function == 0 && entry.index == 0 && entry.flags == 0 && entry.eax == 0)
         });
+
 
         Ok(cpuid)
     }
@@ -635,10 +642,19 @@ impl KvmVcpu {
     /// Opposed to `save_state()`, this dumps all the supported and dumpable MSRs not limited to
     /// serializable ones.
     pub fn dump_cpu_config(&self) -> Result<CpuConfiguration, KvmVcpuError> {
+        // 查询 vCPU 的 CPUID 信息
         let cpuid = cpuid::Cpuid::try_from(self.get_cpuid()?)?;
+
+
+        // 获取 msr 索引列表
         let kvm = kvm_ioctls::Kvm::new().unwrap();
         let msr_index_list = crate::arch::x86_64::msr::get_msrs_to_dump(&kvm)?;
+        
+        
+        // 根据 msr 的索引查询 msr 的值
         let msrs = self.get_msrs(msr_index_list.as_slice().iter().copied())?;
+        
+        
         Ok(CpuConfiguration { cpuid, msrs })
     }
 
