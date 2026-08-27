@@ -29,7 +29,9 @@ pub enum InfoVmStateSubCommand {
         #[arg(short, long)]
         vmstate_path: PathBuf,
     },
+    /// Print info about vcpu msr states
     MsrState {
+        /// Path to the vmstate file.
         #[arg(short, long)]
         vmstate_path: PathBuf,
     },
@@ -82,19 +84,16 @@ fn msr_state(snapshot: &Snapshot<MicrovmState>) -> Result<(), InfoVmStateError> 
     for (i, state) in snapshot.data.vcpu_states.iter().enumerate() {
         println!("vcpu {i}:");
 
-        // 额外结构化打印真正的 MSR entry
-        println!("saved_msrs:");
-
         for (chunk_index, chunk) in state.saved_msrs.iter().enumerate() {
             let entries = chunk.as_slice();
 
-            println!("  chunk {chunk_index}:");
-            println!("    count: {}", entries.len());
+            println!("chunk {chunk_index}:");
+            println!("  count: {}", entries.len());
 
             for (entry_index, entry) in entries.iter().enumerate() {
-                println!("    entry {entry_index}:");
-                println!("      index: {:#x}", entry.index);
-                println!("      data:  {:#x}", entry.data);
+                println!("  entry {entry_index}:");
+                println!("    index: {:#x}", entry.index);
+                println!("    data:  {:#x}", entry.data);
             }
         }
 
