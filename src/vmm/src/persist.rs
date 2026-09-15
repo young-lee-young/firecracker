@@ -121,11 +121,6 @@ pub struct GuestRegionUffdMapping {
     /// The configured page size for this memory region.
     /// 一页大小
     pub page_size: usize,
-    /// The configured page size **in bytes** for this memory region. The name is
-    /// wrong but cannot be changed due to being API, so this field is deprecated,
-    /// to be removed in 2.0.
-    #[deprecated]
-    pub page_size_kib: usize,
 }
 
 /// Errors related to saving and restoring Microvm state.
@@ -206,6 +201,9 @@ fn snapshot_state_to_file(
     snapshot_path: &Path,
 ) -> Result<(), CreateSnapshotError> {
     use self::CreateSnapshotError::*;
+
+
+    // 创建 snapshot 文件
     let mut snapshot_file = OpenOptions::new()
         .create(true)
         .write(true)
@@ -213,8 +211,15 @@ fn snapshot_state_to_file(
         .open(snapshot_path)
         .map_err(|err| SnapshotBackingFile("open", err))?;
 
+
+    // 实例化一个 snapshot
     let snapshot = Snapshot::new(microvm_state);
+
+
+    // 把 snapshot 序列化后写入 snapshot 文件
     snapshot.save(&mut snapshot_file)?;
+
+
     snapshot_file
         .flush()
         .map_err(|err| SnapshotBackingFile("flush", err))?;
@@ -455,6 +460,15 @@ pub fn restore_from_snapshot(
 
     let (guest_memory, uffd) = match params.mem_backend.backend_type {
         MemBackendType::File => {
+            // 如果使用了大页，那么文件恢复内存的方式是不允许的
+            /**
+            mmap(..., MAP_PRIVATE | MAP_HUGETLB, vm_mem_fd, 0);
+
+            假如我们这样映射内存文件，那么这个内存文件后端需要支持 hugetlb
+
+            但是我们现在使用的是普通的文件系统，一般是 4 KiB，是不支持 hugetlb 的
+            */
+
             if vm_resources.machine_config.huge_pages.is_hugetlbfs() {
                 return Err(RestoreFromSnapshotGuestMemoryError::File(
                     GuestMemoryFromFileError::HugetlbfsSnapshot,
@@ -604,7 +618,6 @@ fn create_guest_memory(
             size: mem_region.size(),
             offset,
             page_size: huge_pages.page_size(),
-            page_size_kib: huge_pages.page_size(),
         });
         offset += mem_region.size() as u64;
     }

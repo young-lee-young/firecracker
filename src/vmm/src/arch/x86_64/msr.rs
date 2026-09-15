@@ -273,6 +273,12 @@ CPUID 告诉 guest 的 CPU 支持哪些能力
 MSR 则是保存和控制这些能力的状态开关
 */
 
+/**
+在非虚拟化环境下，MSR 存储在 CPU 的寄存器中
+
+在虚拟化环境下，这些 MSR 是由 KVM 来维护的，而不是在 firecracker 中来维护
+*/
+
 /// Returns the list of serializable MSR indices.
 ///
 /// # Arguments
@@ -478,6 +484,7 @@ pub fn create_boot_msr_entries() -> Vec<kvm_msr_entry> {
 /// - [`kvm_ioctls::ioctls::vcpu::VcpuFd::set_msrs`] fails to write all given MSRs entries.
 pub fn set_msrs(vcpu: &VcpuFd, msr_entries: &[kvm_msr_entry]) -> Result<(), MsrError> {
     let msrs = Msrs::from_entries(msr_entries)?;
+    // 这里真正调用 KVM 设置 MSR 寄存器
     vcpu.set_msrs(&msrs)
         .map_err(MsrError::SetMsrs)
         .and_then(|msrs_written| {

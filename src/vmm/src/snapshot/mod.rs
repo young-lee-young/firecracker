@@ -79,49 +79,6 @@ struct SnapshotHdr {
     version: Version,
 }
 
-/// Assumes the raw bytes stream read from the given [`Read`] instance is a snapshot file,
-/// and returns the version of it.
-pub fn get_format_version<R: Read>(reader: &mut R) -> Result<Version, SnapshotError> {
-    // Check size limit before reading the full file to prevent DOS attacks
-    let mut buf = Vec::new();
-    let bytes_read = reader
-        .take((SNAPSHOT_DESERIALIZATION_BYTES_LIMIT + 1) as u64)
-        .read_to_end(&mut buf)?;
-
-    if bytes_read > SNAPSHOT_DESERIALIZATION_BYTES_LIMIT {
-        return Err(SnapshotError::SizeLimitExceeded(
-            SNAPSHOT_DESERIALIZATION_BYTES_LIMIT,
-        ));
-    }
-
-    // The last 8 bytes are the CRC, so we need to separate them for deserialization
-    if buf.len() < 8 {
-        return Err(SnapshotError::Io(std::io::Error::new(
-            std::io::ErrorKind::UnexpectedEof,
-            "File too short to contain CRC",
-        )));
-    }
-
-    let (data_buf, _crc_buf) = buf.split_at(buf.len() - 8);
-
-    // Since bitcode requires exact type matching, we need to try deserializing
-    // as the specific snapshot type we know about. In practice, all snapshots
-    // in Firecracker use MicrovmState as the data type.
-    use crate::persist::MicrovmState;
-
-    match bitcode::deserialize::<Snapshot<MicrovmState>>(data_buf) {
-        Ok(snapshot) => Ok(snapshot.header.version),
-        Err(e) => {
-            // If deserialization fails, it could be due to:
-            // 1. The snapshot was created with bincode (older versions)
-            // 2. The MicrovmState structure has changed and is incompatible
-            // 3. The snapshot file is corrupted
-            // Since supporting bincode is out of scope, we return a descriptive error.
-            Err(SnapshotError::Bitcode(e))
-        }
-    }
-}
-
 /// Firecracker snapshot type
 ///
 /// A type used to store and load Firecracker snapshots of a particular version
@@ -140,6 +97,7 @@ impl<Data> Snapshot<Data> {
                 magic: SNAPSHOT_MAGIC_ID,
                 version: SNAPSHOT_VERSION.clone(),
             },
+            // 这个 data 是 MicrovmState 结构体
             data,
         }
     }
@@ -182,6 +140,9 @@ impl<Data: DeserializeOwned> Snapshot<Data> {
     pub fn load<R: Read>(reader: &mut R) -> Result<Self, SnapshotError> {
         // Check size limit before reading the full file to prevent DOS attacks
         let mut buf = Vec::new();
+
+
+        // 会检查 snapshot 文件的的大小
         let bytes_read = reader
             .take((SNAPSHOT_DESERIALIZATION_BYTES_LIMIT + 1) as u64)
             .read_to_end(&mut buf)?;
@@ -200,9 +161,13 @@ impl<Data: DeserializeOwned> Snapshot<Data> {
             )));
         }
 
+
+        // 去掉 CRC 后，把数据反序列化成 Snapshot
         let (data_buf, _crc_buf) = buf.split_at(buf.len() - 8);
         let snapshot = Self::load_without_crc_check(data_buf)?;
 
+
+        // CRC 校验
         let computed_checksum = crc64(0, buf.as_slice());
         // When we read the entire file, we also read the checksum into the buffer. The CRC has the
         // property that crc(0, buf.as_slice()) == 0 iff the last 8 bytes of buf are the checksum

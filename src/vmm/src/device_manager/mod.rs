@@ -150,6 +150,7 @@ impl DeviceManager {
         rate_limiter: Option<TokenBucket>,
     ) -> Result<Arc<Mutex<SerialDevice>>, std::io::Error> {
         let (serial_in, serial_out) = match output {
+            // 如果配置了输出文件，那么就是纯输出模式
             Some(path) => (
                 None,
                 SerialOut::new(
@@ -157,6 +158,7 @@ impl DeviceManager {
                     rate_limiter,
                 ),
             ),
+            // 没有配置输出文件，是一个标准输入输出的交互式串口
             None => {
                 Self::set_stdout_nonblocking();
 
@@ -167,7 +169,11 @@ impl DeviceManager {
             }
         };
 
+
         let serial = Arc::new(Mutex::new(SerialDevice::new(serial_in, serial_out, state)?));
+
+
+        // 串口设备订阅 eventfd 事件
         event_manager.add_subscriber(serial.clone());
         Ok(serial)
     }
@@ -341,39 +347,6 @@ impl DeviceManager {
     pub(crate) fn attach_vmclock_device(&mut self, vm: &KvmVm) -> Result<(), AttachDeviceError> {
         self.acpi_devices.attach_vmclock(vm)?;
         self.acpi_devices.activate_vmclock(vm)?;
-        Ok(())
-    }
-
-    #[cfg(target_arch = "aarch64")]
-    pub(crate) fn attach_legacy_devices_aarch64(
-        &mut self,
-        vm: &KvmVm,
-        event_manager: &mut EventManager,
-        cmdline: &mut Cmdline,
-        serial_out_path: Option<&PathBuf>,
-        serial_rate_limiter: Option<TokenBucket>,
-    ) -> Result<(), AttachDeviceError> {
-        // Serial device setup.
-        let cmdline_contains_console = cmdline
-            .as_cstring()
-            .map_err(|_| AttachDeviceError::Cmdline)?
-            .into_string()
-            .map_err(|_| AttachDeviceError::Cmdline)?
-            .contains("console=");
-
-        if cmdline_contains_console {
-            let serial = Self::setup_serial_device(
-                event_manager,
-                serial_out_path,
-                None,
-                serial_rate_limiter,
-            )?;
-            self.mmio_devices.register_mmio_serial(vm, serial, None)?;
-            self.mmio_devices.add_mmio_serial_to_cmdline(cmdline)?;
-        }
-
-        let rtc = Arc::new(Mutex::new(RTCDevice::new()));
-        self.mmio_devices.register_mmio_rtc(vm, rtc, None)?;
         Ok(())
     }
 

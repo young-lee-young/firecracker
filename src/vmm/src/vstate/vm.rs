@@ -390,7 +390,7 @@ impl KvmVm {
             .collect::<Result<Vec<crate::VcpuResponse>, _>>()
             .map_err(|_| MicrovmStateError::UnexpectedVcpuResponse)?;
 
-        
+
         // 检查所有的事件处理的是否成功
         // 成功的话会收集 vCPU 的状态
         vcpu_responses
@@ -446,12 +446,18 @@ impl KvmVm {
     /// Sends finish events to all vCPU threads and joins them.
     pub fn shutdown_vcpus(&self) {
         let mut handles = self.vcpus_handles();
+
+
+        // 向 vCPU 线程发送 Finish 事件
         for (idx, handle) in handles.iter_mut().enumerate() {
             if let Err(err) = handle.send_event(crate::VcpuEvent::Finish) {
                 crate::logger::error!("Failed to send VcpuEvent::Finish to vCPU {}: {}", idx, err);
             }
         }
+
+
         // Join the vCPU threads by running VcpuHandle::drop().
+        // 这里会执行 VcpuHandle 的 drop 方法
         handles.clear();
     }
 

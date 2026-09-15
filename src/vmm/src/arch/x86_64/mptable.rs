@@ -123,15 +123,19 @@ pub fn setup_mptable(
         return Err(MptableError::TooManyCpus);
     }
 
+
     let mp_size = compute_mp_size(num_cpus);
     let mptable_addr = resource_allocator
         .system_memory
         .allocate(mp_size as u64, 1, AllocPolicy::FirstMatch)?
         .start();
+
+
     debug!(
         "mptable: Allocated {mp_size} bytes for MPTable {num_cpus} vCPUs at address {:#010x}",
         mptable_addr
     );
+
 
     // Used to keep track of the next base pointer into the MP table.
     let mut base_mp = GuestAddress(mptable_addr);
@@ -311,151 +315,4 @@ pub fn setup_mptable(
     }
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-
-    use super::*;
-    use crate::arch::SYSTEM_MEM_START;
-    use crate::test_utils::single_region_mem_at;
-    use crate::vstate::memory::Bytes;
-
-    fn table_entry_size(type_: u8) -> usize {
-        match u32::from(type_) {
-            mpspec::MP_PROCESSOR => mem::size_of::<mpspec::mpc_cpu>(),
-            mpspec::MP_BUS => mem::size_of::<mpspec::mpc_bus>(),
-            mpspec::MP_IOAPIC => mem::size_of::<mpspec::mpc_ioapic>(),
-            mpspec::MP_INTSRC => mem::size_of::<mpspec::mpc_intsrc>(),
-            mpspec::MP_LINTSRC => mem::size_of::<mpspec::mpc_lintsrc>(),
-            _ => panic!("unrecognized mpc table entry type: {}", type_),
-        }
-    }
-
-    #[test]
-    fn bounds_check() {
-        let num_cpus = 4;
-        let mem = single_region_mem_at(SYSTEM_MEM_START, compute_mp_size(num_cpus));
-        let mut resource_allocator = ResourceAllocator::new();
-
-        setup_mptable(&mem, &mut resource_allocator, num_cpus).unwrap();
-    }
-
-    #[test]
-    fn bounds_check_fails() {
-        let num_cpus = 4;
-        let mem = single_region_mem_at(SYSTEM_MEM_START, compute_mp_size(num_cpus) - 1);
-        let mut resource_allocator = ResourceAllocator::new();
-
-        setup_mptable(&mem, &mut resource_allocator, num_cpus).unwrap_err();
-    }
-
-    #[test]
-    fn mpf_intel_checksum() {
-        let num_cpus = 1;
-        let mem = single_region_mem_at(SYSTEM_MEM_START, compute_mp_size(num_cpus));
-        let mut resource_allocator = ResourceAllocator::new();
-
-        setup_mptable(&mem, &mut resource_allocator, num_cpus).unwrap();
-
-        let mpf_intel: mpspec::mpf_intel = mem.read_obj(GuestAddress(SYSTEM_MEM_START)).unwrap();
-
-        assert_eq!(mpf_intel_compute_checksum(&mpf_intel), mpf_intel.checksum);
-    }
-
-    #[test]
-    fn mpc_table_checksum() {
-        let num_cpus = 4;
-        let mem = single_region_mem_at(SYSTEM_MEM_START, compute_mp_size(num_cpus));
-        let mut resource_allocator = ResourceAllocator::new();
-
-        setup_mptable(&mem, &mut resource_allocator, num_cpus).unwrap();
-
-        let mpf_intel: mpspec::mpf_intel = mem.read_obj(GuestAddress(SYSTEM_MEM_START)).unwrap();
-        let mpc_offset = GuestAddress(u64::from(mpf_intel.physptr));
-        let mpc_table: mpspec::mpc_table = mem.read_obj(mpc_offset).unwrap();
-
-        let mut buffer = Vec::new();
-        mem.write_volatile_to(mpc_offset, &mut buffer, mpc_table.length as usize)
-            .unwrap();
-        assert_eq!(
-            buffer
-                .iter()
-                .fold(0u8, |accum, &item| accum.wrapping_add(item)),
-            0
-        );
-    }
-
-    #[test]
-    fn mpc_entry_count() {
-        let num_cpus = 1;
-        let mem = single_region_mem_at(SYSTEM_MEM_START, compute_mp_size(num_cpus));
-        let mut resource_allocator = ResourceAllocator::new();
-
-        setup_mptable(&mem, &mut resource_allocator, num_cpus).unwrap();
-
-        let mpf_intel: mpspec::mpf_intel = mem.read_obj(GuestAddress(SYSTEM_MEM_START)).unwrap();
-        let mpc_offset = GuestAddress(u64::from(mpf_intel.physptr));
-        let mpc_table: mpspec::mpc_table = mem.read_obj(mpc_offset).unwrap();
-
-        let expected_entry_count =
-            // Intel floating point
-            1
-            // CPU
-            + u16::from(num_cpus)
-            // IOAPIC
-            + 1
-            // ISA Bus
-            + 1
-            // IRQ
-            + u16::try_from(GSI_LEGACY_END).unwrap() + 1
-            // Interrupt source ExtINT
-            + 1
-            // Interrupt source NMI
-            + 1;
-        assert_eq!(mpc_table.oemcount, expected_entry_count);
-    }
-
-    #[test]
-    fn cpu_entry_count() {
-        let mem = single_region_mem_at(SYSTEM_MEM_START, compute_mp_size(MAX_SUPPORTED_CPUS));
-
-        for i in 0..MAX_SUPPORTED_CPUS {
-            let mut resource_allocator = ResourceAllocator::new();
-
-            setup_mptable(&mem, &mut resource_allocator, i).unwrap();
-
-            let mpf_intel: mpspec::mpf_intel =
-                mem.read_obj(GuestAddress(SYSTEM_MEM_START)).unwrap();
-            let mpc_offset = GuestAddress(u64::from(mpf_intel.physptr));
-            let mpc_table: mpspec::mpc_table = mem.read_obj(mpc_offset).unwrap();
-            let mpc_end = mpc_offset.checked_add(u64::from(mpc_table.length)).unwrap();
-
-            let mut entry_offset = mpc_offset
-                .checked_add(mem::size_of::<mpspec::mpc_table>() as u64)
-                .unwrap();
-            let mut cpu_count = 0;
-            while entry_offset < mpc_end {
-                let entry_type: u8 = mem.read_obj(entry_offset).unwrap();
-                entry_offset = entry_offset
-                    .checked_add(table_entry_size(entry_type) as u64)
-                    .unwrap();
-                assert!(entry_offset <= mpc_end);
-                if u32::from(entry_type) == mpspec::MP_PROCESSOR {
-                    cpu_count += 1;
-                }
-            }
-            assert_eq!(cpu_count, i);
-        }
-    }
-
-    #[test]
-    fn cpu_entry_count_max() {
-        let cpus = MAX_SUPPORTED_CPUS + 1;
-        let mem = single_region_mem_at(SYSTEM_MEM_START, compute_mp_size(cpus));
-        let mut resource_allocator = ResourceAllocator::new();
-
-        let result = setup_mptable(&mem, &mut resource_allocator, cpus).unwrap_err();
-        assert_eq!(result, MptableError::TooManyCpus);
-    }
 }

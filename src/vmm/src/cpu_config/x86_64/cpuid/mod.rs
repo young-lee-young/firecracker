@@ -74,12 +74,15 @@ fn cpuid(leaf: u32) -> std::arch::x86_64::CpuidResult {
 }
 
 /// Safe wrapper around [`std::arch::x86_64::__cpuid_count`].
+/// 通过 leaf 和 subleaf 查询 CPUID 信息
+/// 返回的是 eax ebx ecx edx 4 个寄存器信息
 fn cpuid_count(leaf: u32, subleaf: u32) -> std::arch::x86_64::CpuidResult {
     // JUSTIFICATION: There is no safe alternative.
     // SAFETY: The `cfg(cpuid)` wrapping the `cpuid` module guarantees `CPUID` is supported.
     // TODO: Remove `unsafe` block when Kani nightly toolchain is updated to be >=1.94.0
     #[allow(unused_unsafe)]
     unsafe {
+        // 这里直接用汇编查询
         std::arch::x86_64::__cpuid_count(leaf, subleaf)
     }
 }

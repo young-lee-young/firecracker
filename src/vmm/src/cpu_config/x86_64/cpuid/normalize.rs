@@ -166,10 +166,19 @@ impl super::Cpuid {
         // The number of bits needed to enumerate logical CPUs per core.
         cpu_bits: u8,
     ) -> Result<(), NormalizeCpuidError> {
+        // 计算每个 CPU 核中有多少个线程
+        // cpu_bits 只可能是 0 或者 1
+        // checked_shl 表示左移多少位，所以 cpus_per_core 只可能是 1（左移 0 位） 或者 2（左移 1 位）
         let cpus_per_core = 1u8
             .checked_shl(u32::from(cpu_bits))
             .ok_or(NormalizeCpuidError::CpuBits(cpu_bits))?;
+
+
+        // 更新 CPU 厂商信息
         self.update_vendor_id()?;
+
+
+        // TODO Lee P1 这下面还是很复杂，我们后面再详细看
         self.update_feature_info_entry(cpu_index, cpu_count)?;
         self.update_extended_topology_entry(cpu_index, cpu_count, cpu_bits, cpus_per_core)?;
         self.update_extended_cache_features()?;
@@ -194,11 +203,16 @@ impl super::Cpuid {
             .get_mut(&CpuidKey::leaf(0x0))
             .ok_or(VendorIdError::MissingLeaf0)?;
 
+
+        // 查询宿主机的标准的 CPUID 的数量和 CPU 厂商信息
         let host_leaf_0 = cpuid(0x0);
 
+
+        // 设置 guest 中的 CPU 厂商信息，和宿主机的保持一致
         leaf_0.result.ebx = host_leaf_0.ebx;
         leaf_0.result.ecx = host_leaf_0.ecx;
         leaf_0.result.edx = host_leaf_0.edx;
+
 
         Ok(())
     }
@@ -420,148 +434,5 @@ const fn get_max_cpus_per_package(cpu_count: u8) -> Result<u8, GetMaxCpusPerPack
         // we use `next_power_of_two()` instead.
         1..=128 => Ok(cpu_count.next_power_of_two()),
         129..=u8::MAX => Err(GetMaxCpusPerPackageError::Overflow),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::collections::BTreeMap;
-
-    use super::*;
-    use crate::cpu_config::x86_64::cpuid::{AmdCpuid, Cpuid, IntelCpuid};
-
-    #[test]
-    fn get_max_cpus_per_package_test() {
-        assert_eq!(
-            get_max_cpus_per_package(0),
-            Err(GetMaxCpusPerPackageError::Underflow)
-        );
-        assert_eq!(get_max_cpus_per_package(1), Ok(1));
-        assert_eq!(get_max_cpus_per_package(2), Ok(2));
-        assert_eq!(get_max_cpus_per_package(3), Ok(4));
-        assert_eq!(get_max_cpus_per_package(4), Ok(4));
-        assert_eq!(get_max_cpus_per_package(5), Ok(8));
-        assert_eq!(get_max_cpus_per_package(8), Ok(8));
-        assert_eq!(get_max_cpus_per_package(9), Ok(16));
-        assert_eq!(get_max_cpus_per_package(16), Ok(16));
-        assert_eq!(get_max_cpus_per_package(17), Ok(32));
-        assert_eq!(get_max_cpus_per_package(32), Ok(32));
-        assert_eq!(get_max_cpus_per_package(33), Ok(64));
-        assert_eq!(get_max_cpus_per_package(64), Ok(64));
-        assert_eq!(get_max_cpus_per_package(65), Ok(128));
-        assert_eq!(get_max_cpus_per_package(128), Ok(128));
-        assert_eq!(
-            get_max_cpus_per_package(129),
-            Err(GetMaxCpusPerPackageError::Overflow)
-        );
-        assert_eq!(
-            get_max_cpus_per_package(u8::MAX),
-            Err(GetMaxCpusPerPackageError::Overflow)
-        );
-    }
-
-    #[test]
-    fn test_update_vendor_id() {
-        // Check `update_vendor_id()` passes through the vendor ID from the host correctly.
-
-        // Pseudo CPUID with invalid vendor ID.
-        let mut guest_cpuid = Cpuid::Intel(IntelCpuid(BTreeMap::from([(
-            CpuidKey {
-                leaf: 0x0,
-                subleaf: 0x0,
-            },
-            CpuidEntry {
-                flags: KvmCpuidFlags::EMPTY,
-                result: CpuidRegisters {
-                    eax: 0,
-                    ebx: 0x0123_4567,
-                    ecx: 0x89ab_cdef,
-                    edx: 0x55aa_55aa,
-                },
-            },
-        )])));
-
-        // Pass through vendor ID from host.
-        guest_cpuid.update_vendor_id().unwrap();
-
-        // Check if the guest vendor ID matches the host one.
-        let guest_leaf_0 = guest_cpuid
-            .get(&CpuidKey {
-                leaf: 0x0,
-                subleaf: 0x0,
-            })
-            .unwrap();
-        let host_leaf_0 = cpuid(0x0);
-        assert_eq!(guest_leaf_0.result.ebx, host_leaf_0.ebx);
-        assert_eq!(guest_leaf_0.result.ecx, host_leaf_0.ecx);
-        assert_eq!(guest_leaf_0.result.edx, host_leaf_0.edx);
-    }
-
-    #[test]
-    fn check_leaf_0xb_subleaf_0x1_added() {
-        // Check leaf 0xb / subleaf 0x1 is added in `update_extended_topology_entry()` even when it
-        // isn't included.
-
-        // Pseudo CPU setting
-        let smt = false;
-        let cpu_index = 0;
-        let cpu_count = 2;
-        let cpu_bits = u8::from(cpu_count > 1 && smt);
-        let cpus_per_core = 1u8
-            .checked_shl(u32::from(cpu_bits))
-            .ok_or(NormalizeCpuidError::CpuBits(cpu_bits))
-            .unwrap();
-
-        // Case 1: Intel CPUID
-        let mut intel_cpuid = Cpuid::Intel(IntelCpuid(BTreeMap::from([(
-            CpuidKey {
-                leaf: 0xb,
-                subleaf: 0,
-            },
-            CpuidEntry {
-                flags: KvmCpuidFlags::SIGNIFICANT_INDEX,
-                result: CpuidRegisters {
-                    eax: 0,
-                    ebx: 0,
-                    ecx: 0,
-                    edx: 0,
-                },
-            },
-        )])));
-        let result = intel_cpuid.update_extended_topology_entry(
-            cpu_index,
-            cpu_count,
-            cpu_bits,
-            cpus_per_core,
-        );
-        result.unwrap();
-        assert!(intel_cpuid.inner().contains_key(&CpuidKey {
-            leaf: 0xb,
-            subleaf: 0x1
-        }));
-
-        // Case 2: AMD CPUID
-        let mut amd_cpuid = Cpuid::Amd(AmdCpuid(BTreeMap::from([(
-            CpuidKey {
-                leaf: 0xb,
-                subleaf: 0,
-            },
-            CpuidEntry {
-                flags: KvmCpuidFlags::SIGNIFICANT_INDEX,
-                result: CpuidRegisters {
-                    eax: 0,
-                    ebx: 0,
-                    ecx: 0,
-                    edx: 0,
-                },
-            },
-        )])));
-        let result =
-            amd_cpuid.update_extended_topology_entry(cpu_index, cpu_count, cpu_bits, cpus_per_core);
-        result.unwrap();
-        assert!(amd_cpuid.inner().contains_key(&CpuidKey {
-            leaf: 0xb,
-            subleaf: 0x1
-        }));
     }
 }

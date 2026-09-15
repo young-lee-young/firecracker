@@ -362,28 +362,6 @@ impl<'a> Persist<'a> for MMIODeviceManager {
         let mem = constructor_args.mem;
         let vm = constructor_args.vm;
 
-        #[cfg(target_arch = "aarch64")]
-        {
-            for state in &state.legacy_devices {
-                if state.type_ == DeviceType::Serial {
-                    let serial_state: Option<vm_superio::serial::SerialState> =
-                        constructor_args.serial_state.map(Into::into);
-                    let serial = crate::DeviceManager::setup_serial_device(
-                        constructor_args.event_manager,
-                        constructor_args.vm_resources.serial_out_path.as_ref(),
-                        serial_state.as_ref(),
-                        constructor_args.vm_resources.serial_rate_limiter(),
-                    )?;
-
-                    dev_manager.register_mmio_serial(vm, serial, Some(state.device_info))?;
-                }
-                if state.type_ == DeviceType::Rtc {
-                    let rtc = Arc::new(Mutex::new(RTCDevice::new()));
-                    dev_manager.register_mmio_rtc(vm, rtc, Some(state.device_info))?;
-                }
-            }
-        }
-
         let mut restore_helper = |device: Arc<Mutex<dyn VirtioDevice>>,
                                   activated: bool,
                                   is_vhost_user: bool,

@@ -462,14 +462,22 @@ impl Vmm {
     /// 3 个地方会调用这个方法
     /// 1. 创建 firecracker 的时候，最后启动的时候
     /// 2. resume 接口
-    /// 3. load snapshot 的时候
+    /// 3. load snapshot 的时候，最后启动的时候
     pub fn resume_vm(&mut self) -> Result<(), VmmError> {
         let kvm_vm = self
             .vm
             .as_kvm()
             .ok_or_else(|| VmmError::NotSupportedOnVmType(self.vm.type_name()))?;
+
+
+        // 这里也很简单，把 virtio 和 pci 设备发送 eventfd 事件
         self.device_manager.kick_virtio_devices();
+
+
+        // vCPU 发送 eventfd 事件
         kvm_vm.resume_vcpus()?;
+
+
         self.instance_info.state = VmState::Running;
         Ok(())
     }
@@ -839,6 +847,7 @@ impl MutEventSubscriber for Vmm {
 
 
                     // 把自己设置成退出状态
+                    // 比如在 guest 执行了关机的操作，最终会收到事件
                     self.stop(exit_code);
                 } else {
                     error!("Spurious EventManager event for handler: Vmm");

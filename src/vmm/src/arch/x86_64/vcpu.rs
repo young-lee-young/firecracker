@@ -207,6 +207,7 @@ impl KvmVcpu {
     ) -> Result<(), KvmVcpuConfigureError> {
         let mut cpuid = vcpu_config.cpu_config.cpuid.clone();
 
+
         // 这里是根据是否启用超线程，修改 guest 中看到的 CPU 视图
         // 这里其实还没有调用底层，只是修改了一下 cpuid 的数据结构
         // TODO Lee P2 这里的逻辑以后要详细看一下
@@ -217,6 +218,8 @@ impl KvmVcpu {
             // The total number of logical CPUs.
             vcpu_config.vcpu_count,
             // The number of bits needed to enumerate logical CPUs per core.
+            // 如果 vCPU 的数量大于 0，并且启用了超线程，这个参数是 1
+            // 否则这个参数是 0
             u8::from(vcpu_config.vcpu_count > 1 && vcpu_config.smt),
         )?;
 
@@ -227,7 +230,7 @@ impl KvmVcpu {
 
 
         // Set CPUID in the KVM
-        // 真正调用 KVM 设置 CPUID 信息，这里真正限制了 guest 中的 CPUID 能力
+        // 真正调用 KVM 设置 CPUID 信息，这里真正设置了 guest 中的 CPUID 能力
         // 参考 https://docs.kernel.org/virt/kvm/api.html#kvm-set-cpuid
         self.fd
             .set_cpuid2(&kvm_cpuid)
@@ -238,13 +241,17 @@ impl KvmVcpu {
         // 这里 vcpu_config.cpu_config.msrs 是 cpu template 中关注的 msr
         let mut msrs = vcpu_config.cpu_config.msrs.clone();
         // msrs_to_save 是最开始调用 KVM 查询到的 msr（也就是 vm 中查询的保存 snapshot 需要保存的 msr）
+        // 把 cpu template 中的 MSR 的 index 也放到 msrs_to_save 里面
         self.msrs_to_save.extend(msrs.keys());
 
 
         // Apply MSR modification to comply the linux boot protocol.
+        // 构造一些系统启动需要的 MSR，比如 CS、ESP、EIP 这些
         create_boot_msr_entries().into_iter().for_each(|entry| {
+            // msrs 是：cpu template MSR + 系统启动的 MSR
             msrs.insert(entry.index, entry.data);
         });
+
 
         // TODO - Add/amend MSRs for vCPUs based on cpu_config
         // By this point the Guest CPUID is established. Some CPU features require MSRs
@@ -254,6 +261,8 @@ impl KvmVcpu {
         // value when we restore the microVM since the Guest may need that value.
         // Since CPUID tells us what features are enabled for the Guest, we can infer
         // the extra MSRs that we need to save based on a dependency map.
+        // 简单说，就是看 guest 启动了哪些 CPU 特性，这些 CPU 特性依赖哪些 MSR
+        // 把这些依赖的 MSR 也加入到 msrs_to_save 里面
         let extra_msrs = cpuid::common::msrs_to_save_by_cpuid(&kvm_cpuid);
         self.msrs_to_save.extend(extra_msrs);
 
@@ -264,6 +273,8 @@ impl KvmVcpu {
         // save is `architectural MSRs` + `MSRs inferred through CPUID` + `other
         // MSRs defined by the template`
 
+
+        // 把 msrs 转换成 KVM 中的格式
         let kvm_msrs = msrs
             .into_iter()
             .map(|entry| kvm_bindings::kvm_msr_entry {
@@ -273,11 +284,19 @@ impl KvmVcpu {
             })
             .collect::<Vec<_>>();
 
+
+        // 设置 MSR 寄存器
         crate::arch::x86_64::msr::set_msrs(&self.fd, &kvm_msrs)?;
+        // 设置通用寄存器
         crate::arch::x86_64::regs::setup_regs(&self.fd, kernel_entry_point)?;
+        // 设置浮点和 SIMD 运算状态
         crate::arch::x86_64::regs::setup_fpu(&self.fd)?;
+        // 设置系统寄存器和 CPU 运行模式
         crate::arch::x86_64::regs::setup_sregs(guest_mem, &self.fd, kernel_entry_point.protocol)?;
+        // 设置本地中断（Local APIC）入口
         crate::arch::x86_64::interrupts::set_lint(&self.fd)?;
+
+
         Ok(())
     }
 

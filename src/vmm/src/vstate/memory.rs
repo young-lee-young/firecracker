@@ -630,6 +630,7 @@ pub fn snapshot_file(
     regions: impl Iterator<Item = (GuestAddress, usize)>,
     track_dirty_pages: bool,
 ) -> Result<Vec<GuestRegionMmap>, MemoryError> {
+    // TODO Lee P1 这里需要确认 diff 的 memfile 是怎么做的
     let regions: Vec<_> = regions.collect();
     let memory_size = regions
         .iter()

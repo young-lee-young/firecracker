@@ -187,11 +187,14 @@ pub fn configure_system_for_boot(
     boot_cmdline: Cmdline,
 ) -> Result<(), ConfigurationError> {
     // Construct the base CpuConfiguration to apply CPU template onto.
+    // 这里结束后 CPUID 还是全量的，MSR 只有 cpu template 中指定的那些了
     let cpu_config = CpuConfiguration::new(kvm.supported_cpuid.clone(), cpu_template, &vcpus[0])?;
 
 
-    // 把 cpu template 中对 CPUID 和 MSR，应用上
     // Apply CPU template to the base CpuConfiguration.
+    // 把 cpu template 中对 CPUID 和 MSR 修的值，应用上
+    // 这里只会把 cpu template 里面的值给应用上，不会删除
+    // 所以 CPUID 还是宿主机上全量的，只是值变了，MSR 是 cpu template 那些
     let cpu_config = CpuConfiguration::apply_template(cpu_config, cpu_template)?;
 
 
@@ -227,6 +230,8 @@ pub fn configure_system_for_boot(
 
 
     // Note that this puts the mptable at the last 1k of Linux's 640k base RAM
+    // 会在 guest 内存中写入一张硬件描述表
+    // 告诉 guest 操作系统 CPU、中断等信息
     mptable::setup_mptable(
         vm.guest_memory(),
         &mut vm.resource_allocator(),

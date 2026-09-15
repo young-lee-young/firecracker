@@ -295,10 +295,6 @@ fn main_exec() -> Result<(), MainError> {
         return Ok(());
     }
 
-    if let Some(snapshot_path) = arguments.single_value("describe-snapshot") {
-        print_snapshot_data_format(snapshot_path)?;
-        return Ok(());
-    }
 
     // 校验实例 ID 的合法性
     // It's safe to unwrap here because the field's been provided with a default value.
@@ -393,7 +389,7 @@ fn main_exec() -> Result<(), MainError> {
 
     let boot_timer_enabled = arguments.flag_present("boot-timer");
     let pci_enabled = arguments.flag_present("enable-pci");
-    
+
     let api_payload_limit = arg_parser
         .arguments()
         .single_value("http-api-max-payload-size")
@@ -497,58 +493,5 @@ fn resize_fdtable() -> Result<(), ResizeFdTableError> {
         }
     }
 
-    Ok(())
-}
-
-/// Enable SSBD mitigation through `prctl`.
-#[cfg(target_arch = "aarch64")]
-pub fn enable_ssbd_mitigation() {
-    // SAFETY: Parameters are valid since they are copied verbatim
-    // from the kernel's UAPI.
-    // PR_SET_SPECULATION_CTRL only uses those 2 parameters, so it's ok
-    // to leave the latter 2 as zero.
-    let ret = unsafe {
-        libc::prctl(
-            generated::prctl::PR_SET_SPECULATION_CTRL,
-            generated::prctl::PR_SPEC_STORE_BYPASS,
-            generated::prctl::PR_SPEC_FORCE_DISABLE,
-            0,
-            0,
-        )
-    };
-
-    if ret < 0 {
-        let last_error = std::io::Error::last_os_error().raw_os_error().unwrap();
-        error_unrestricted!(
-            "Could not enable SSBD mitigation through prctl, error {}",
-            last_error
-        );
-        if last_error == libc::EINVAL {
-            error_unrestricted!("The host does not support SSBD mitigation through prctl.");
-        }
-    }
-}
-
-// Log a warning for any usage of deprecated parameters.
-#[allow(unused)]
-fn warn_deprecated_parameters() {}
-
-#[derive(Debug, thiserror::Error, displaydoc::Display)]
-enum SnapshotVersionError {
-    /// Unable to open snapshot state file: {0}
-    OpenSnapshot(io::Error),
-    /// Invalid data format version of snapshot file: {0}
-    SnapshotVersion(SnapshotError),
-}
-
-// Print data format of provided snapshot state file.
-fn print_snapshot_data_format(snapshot_path: &str) -> Result<(), SnapshotVersionError> {
-    let mut snapshot_reader =
-        File::open(snapshot_path).map_err(SnapshotVersionError::OpenSnapshot)?;
-
-    let data_format_version =
-        get_format_version(&mut snapshot_reader).map_err(SnapshotVersionError::SnapshotVersion)?;
-
-    println!("v{}", data_format_version);
     Ok(())
 }

@@ -565,16 +565,6 @@ pub fn build_microvm_from_snapshot(
             .map_err(BuildMicrovmFromSnapshotError::RestoreVcpus)?;
     }
 
-    #[cfg(target_arch = "aarch64")]
-    {
-        if clock_realtime {
-            return Err(BuildMicrovmFromSnapshotError::UnsupportedClockRealtime);
-        }
-        let mpidrs = construct_kvm_mpidrs(&microvm_state.vcpu_states);
-        // Restore kvm vm state.
-        vm.restore_state(&mpidrs, &microvm_state.vm_state)?;
-    }
-
     // Restore kvm vm state.
     #[cfg(target_arch = "x86_64")]
     vm.restore_state(&microvm_state.vm_state, clock_realtime)?;
@@ -628,51 +618,6 @@ pub fn build_microvm_from_snapshot(
     debug!("event_end: build microvm from snapshot");
 
     Ok(vmm)
-}
-
-/// 64 bytes due to alignment requirement in 3.1 of https://www.kernel.org/doc/html/v5.8/virt/kvm/devices/vcpu.html#attribute-kvm-arm-vcpu-pvtime-ipa
-#[cfg(target_arch = "aarch64")]
-const STEALTIME_STRUCT_MEM_SIZE: u64 = 64;
-
-/// Helper method to allocate steal time region
-#[cfg(target_arch = "aarch64")]
-fn allocate_pvtime_region(
-    resource_allocator: &mut ResourceAllocator,
-    vcpu_count: usize,
-    policy: vm_allocator::AllocPolicy,
-) -> Result<GuestAddress, StartMicrovmError> {
-    let size = STEALTIME_STRUCT_MEM_SIZE * vcpu_count as u64;
-    let addr = resource_allocator
-        .system_memory
-        .allocate(size, STEALTIME_STRUCT_MEM_SIZE, policy)
-        .map_err(StartMicrovmError::AllocateResources)?
-        .start();
-    Ok(GuestAddress(addr))
-}
-
-/// Sets up pvtime for all vcpus
-#[cfg(target_arch = "aarch64")]
-fn setup_pvtime(
-    resource_allocator: &mut ResourceAllocator,
-    vcpus: &mut [Vcpu],
-) -> Result<(), StartMicrovmError> {
-    // Alloc sys mem for steal time region
-    let pvtime_mem: GuestAddress = allocate_pvtime_region(
-        resource_allocator,
-        vcpus.len(),
-        vm_allocator::AllocPolicy::LastMatch,
-    )?;
-
-    // Register all vcpus with pvtime device
-    for (i, vcpu) in vcpus.iter_mut().enumerate() {
-        vcpu.kvm_vcpu
-            .enable_pvtime(GuestAddress(
-                pvtime_mem.0 + i as u64 * STEALTIME_STRUCT_MEM_SIZE,
-            ))
-            .map_err(StartMicrovmError::EnablePVTime)?;
-    }
-
-    Ok(())
 }
 
 fn attach_entropy_device(

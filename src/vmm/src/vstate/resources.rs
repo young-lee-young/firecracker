@@ -39,6 +39,10 @@ fn allocate_many_ids(
 /// * GSIs for legacy x86_64 devices
 /// * GSIs for MMIO devicecs
 /// * Memory allocations in the MMIO address space
+
+/**
+ResourceAllocator 都是从 guest 的物理地址范围中来分配一段地址
+*/
 #[derive(Debug, Clone)]
 pub struct ResourceAllocator {
     /// Allocator for legacy device interrupt lines

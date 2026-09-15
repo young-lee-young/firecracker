@@ -669,7 +669,6 @@ impl<'a> PrebootApiController<'a> {
         &mut self,
         load_params: &LoadSnapshotParams,
     ) -> Result<VmmData, LoadSnapshotError> {
-        let load_start_us = get_time_us(ClockType::Monotonic);
 
         // boot_path 这个字段标记普通启动不允许调用 load_snapshot 方法
         if self.boot_path {
